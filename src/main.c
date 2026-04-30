@@ -93,6 +93,7 @@ static __attribute__((aligned(4))) uint8_t ep1_buf[128];
 #define MODE_SENSE_6_OP (0x1A)
 #define PREVENT_ALLOW_MEDIUM_REMOVAL_OP (0x1E)
 #define WRITE_10_OP (0x2A)
+#define START_STOP_UNIT_OP (0x1B)
 
 uint8_t usb_got = 0;
 
@@ -388,9 +389,23 @@ static inline uint8_t meaningfulCBW(cbw *CBW)
     if (((CBW->bCBWLUN & 0xF0) != 0) || ((CBW->bCBWCBLength & 0xE0) != 0) || CBW->bCBWLUN != 0)
         return 0;
 
-    // TODO: Check if the command is actually supported
+    // Check if the command is supported
+    switch (CBW->CBWCB[0])
+    {
+    case INQUIRY_OP:
+    case TEST_UNIT_READY_OP:
+    case REQUEST_SENSE_OP:
+    case READ_CAPACITY_10_OP:
+    case READ_10_OP:
+    case MODE_SENSE_6_OP:
+    case PREVENT_ALLOW_MEDIUM_REMOVAL_OP:
+    case WRITE_10_OP:
+    case START_STOP_UNIT_OP:
+        return 1;
 
-    return 1;
+    default:
+        return 0;
+    }
 }
 
 device_descriptor dd;
@@ -548,13 +563,7 @@ void USBFS_IRQHandler(void)
                     {
                         chunk2 = off_in_block + chunk1 - LBA_LENGTH;
                         chunk1 -= chunk2;
-                        printf("LBA border W!\r\n");
                     }
-
-                    printf("RX_BUF:\r\n");
-                    for (int i = 0; i < chunk1 + chunk2; i++)
-                        printf("%02x ", EP1_RX_BUF[i]);
-                    printf("\r\n");
 
                     memcpy(disk[curr_LBA] + off_in_block, EP1_RX_BUF, chunk1);
                     if (curr_LBA < NUM_LBA - 1)
@@ -589,7 +598,7 @@ void USBFS_IRQHandler(void)
                     memcpy(&CBW, EP1_RX_BUF, sizeof(cbw));
                     len = USBFSD->RX_LEN;
 
-                    if (!validCBW(&CBW) || !meaningfulCBW(&CBW))
+                    if (!validCBW(&CBW))
                     {
                         printf("Invalid CBW\r\n");
                         USBFSD->UEP1_TX_LEN = 0;
@@ -601,6 +610,25 @@ void USBFS_IRQHandler(void)
                     }
 
                     cbw_tag = CBW.dCBWTag;
+                    csw instaCSW;
+                    instaCSW.dCSWSignature = CSWSignature;
+                    instaCSW.dCSWTag = cbw_tag;
+
+                    if (!meaningfulCBW(&CBW))
+                    {
+                        printf("Unmeaningful CBW\r\n");
+
+                        set_sense(0x05, 0x20, 0x00);
+                        instaCSW.dCSWDataResidue = CBW.dCBWDataTransferLength;
+                        instaCSW.bCSWStatus = 0x01;
+
+                        memcpy(EP1_TX_BUF, &instaCSW, sizeof(csw));
+                        USBFSD->UEP1_TX_LEN = sizeof(csw);
+                        USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+
+                        nice_return;
+                    }
+
                     before_csw = 1;
 
                     // printf("CBCW:\r\n");
@@ -612,9 +640,6 @@ void USBFS_IRQHandler(void)
                     // printf("\r\n");
 
                     uint8_t opcode = CBW.CBWCB[0];
-                    csw instaCSW;
-                    instaCSW.dCSWSignature = CSWSignature;
-                    instaCSW.dCSWTag = cbw_tag;
                     current_csw.dCSWSignature = CSWSignature;
                     current_csw.dCSWTag = cbw_tag;
                     uint16_t data_to_transfer;
@@ -913,6 +938,63 @@ void USBFS_IRQHandler(void)
 
                             nice_return;
                         }
+
+                    case START_STOP_UNIT_OP:
+                        printf("Start Stop Unit\r\n");
+                        uint8_t immed = CBW.CBWCB[1] & 0b1;
+
+                        if (immed)
+                        {
+                            set_sense(0, 0, 0);
+                            instaCSW.dCSWDataResidue = 0;
+                            instaCSW.bCSWStatus = 0x00;
+
+                            memcpy(EP1_TX_BUF, &instaCSW, sizeof(csw));
+                            USBFSD->UEP1_TX_LEN = sizeof(csw);
+                            USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+
+                            nice_return;
+                        }
+
+                        uint8_t ssu_flags = CBW.CBWCB[4];
+
+                        printf("SSU FLAGS: %hu\r\n", ssu_flags);
+
+                        // Power condition > 0
+                        if ((ssu_flags >> 4) > 0)
+                        {
+                            /* We don't support changing to o ACTIVE, IDLE, STANDBY or (o FORCE_IDLE_0 or FORCE_STANDBY_0)
+                             *So everything is treated as an error
+                             */
+                            set_sense(0x05, 0x24, 0x00);
+                            instaCSW.dCSWDataResidue = CBW.dCBWDataTransferLength;
+                            instaCSW.bCSWStatus = 0x01;
+
+                            memcpy(EP1_TX_BUF, &instaCSW, sizeof(csw));
+                            USBFSD->UEP1_TX_LEN = sizeof(csw);
+                            USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+
+                            nice_return;
+                        }
+                        // Process the START and LOEJ bits
+
+                        // Ignore LOEJ because no medium for now
+
+                        // Start
+                        if (ssu_flags & 0b1)
+                            ; // Active power condition + timers
+                        else
+                            ; // Stopped power condition + timers
+                        set_sense(0, 0, 0);
+                        instaCSW.dCSWDataResidue = 0;
+                        instaCSW.bCSWStatus = 0x00;
+
+                        memcpy(EP1_TX_BUF, &instaCSW, sizeof(csw));
+                        USBFSD->UEP1_TX_LEN = sizeof(csw);
+                        USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+
+                        nice_return;
+
                     // TODO: Host asks for sense data if something is wrong
                     case REQUEST_SENSE_OP:
                         printf("Request Sense\r\n");
@@ -957,10 +1039,9 @@ void USBFS_IRQHandler(void)
                         {
                             chunk2 = off_in_block + chunk1 - LBA_LENGTH;
                             chunk1 -= chunk2;
-                            printf("LBA border!\r\n");
                         }
 
-                        printf("Reading from LBA %llu at offset %u %u bytes\r\n", curr_LBA, off_in_block, chunk1);
+                        // printf("Reading from LBA %llu at offset %u %u bytes\r\n", curr_LBA, off_in_block, chunk1);
 
                         memcpy(EP1_TX_BUF, disk[curr_LBA] + off_in_block, chunk1);
                         if (curr_LBA < NUM_LBA - 1)
