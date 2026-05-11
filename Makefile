@@ -27,10 +27,18 @@ SRCS = \
 $(PLATFORM)/system/system_ch32v30x.c \
 $(PLATFORM)/startup/startup_ch32v30x_D8C.S \
 $(VENDOR)/core/core_riscv.c \
-$(VENDOR)/debug/debug.c \
-src/main.c
+$(VENDOR)/debug/debug.c
+
+SRCS += $(wildcard src/*.c)
 
 SRCS += $(wildcard $(VENDOR)/peripheral/src/*.c)
+
+INCLUDES = \
+-I./include \
+-I./$(VENDOR)/core \
+-I./$(VENDOR)/debug \
+-I./$(VENDOR)/peripheral/inc \
+-I./$(PLATFORM)/system
 
 # Build
 BUILD_DIR  = build
@@ -42,7 +50,7 @@ OBJS       := $(OBJS:%.S=$(BUILD_DIR)/%.o)
 CFLAGS  = -g -std=gnu11 $(OPTS)
 CFLAGS += -march=$(ARCH) -mabi=$(ABI)
 CFLAGS += -Wall #-ffreestanding -nostdlib
-CFLAGS += -I./$(VENDOR)/core -I./$(VENDOR)/debug -I./$(VENDOR)/peripheral/inc -I./$(PLATFORM)/system 
+CFLAGS += $(INCLUDES)
 CFLAGS += $(DEFS)
 
 # Linker flags

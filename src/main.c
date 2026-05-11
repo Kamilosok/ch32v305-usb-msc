@@ -3,48 +3,36 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include "debug.h"
 #include <stdio.h>
 #include <string.h>
+#include <debug.h>
 
-#define nice_return                       \
-    do                                    \
-    {                                     \
-        usb_got = 1;                      \
-        NVIC_ClearPendingIRQ(USBFS_IRQn); \
-        USBFSD->INT_FG = intflag;         \
-        return;                           \
-    } while (0)
+#include <usb_descriptors.h>
+#include <msc.h>
+#include <scsi.h>
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
-void USBFS_RCC_Init(void)
-{
-#ifdef CH32V30x_D8C
-    RCC_USBCLK48MConfig(RCC_USBCLK48MCLKSource_USBPHY);
-    RCC_USBHSPLLCLKConfig(RCC_HSBHSPLLCLKSource_HSE);
-    RCC_USBHSConfig(RCC_USBPLL_Div2);
-    RCC_USBHSPLLCKREFCLKConfig(RCC_USBHSPLLCKREFCLK_4M);
-    RCC_USBHSPHYPLLALIVEcmd(ENABLE);
-    // THIS IS ALSO CONFIGURED BY TIM1_INT_Init
-    RCC_AHBPeriphClockCmd(RCC_AHBPeriph_USBHS, ENABLE);
-#else
-    if (SystemCoreClock == 144000000)
-    {
-        RCC_USBFSCLKConfig(RCC_USBFSCLKSource_PLLCLK_Div3);
-    }
-    else if (SystemCoreClock == 96000000)
-    {
-        RCC_USBFSCLKConfig(RCC_USBFSCLKSource_PLLCLK_Div2);
-    }
-    else if (SystemCoreClock == 48000000)
-    {
-        RCC_USBFSCLKConfig(RCC_USBFSCLKSource_PLLCLK_Div1);
-    }
-#endif
-    RCC_AHBPeriphClockCmd(RCC_AHBPeriph_USBFS, ENABLE);
-}
+#define NUM_LBA (0x0036)
+#define LBA_LENGTH (0x0200)
+
+static uint8_t disk[NUM_LBA][LBA_LENGTH];
+
+static __attribute__((aligned(4))) uint8_t ep0_buf[64];
+static __attribute__((aligned(4))) uint8_t ep1_buf[128];
+
+#define EP1_RX_BUF (ep1_buf)
+#define EP1_TX_BUF (ep1_buf + 64)
+
+#define nice_return                       \
+    do                                    \
+    {                                     \
+        usb_update_flag = 1;              \
+        NVIC_ClearPendingIRQ(USBFS_IRQn); \
+        USBFSD->INT_FG = intflag;         \
+        return;                           \
+    } while (0)
 
 void TIM1_INT_Init(u16 arr, u16 psc)
 {
@@ -76,28 +64,47 @@ void TIM1_INT_Init(u16 arr, u16 psc)
     TIM_Cmd(TIM1, ENABLE);
 }
 
-static __attribute__((aligned(4))) uint8_t ep0_buf[64];
-static __attribute__((aligned(4))) uint8_t ep1_buf[128];
+static volatile uint8_t tim1_update_flag = 0;
 
-#define EP1_RX_BUF (ep1_buf)
-#define EP1_TX_BUF (ep1_buf + 64)
+// Interrupt fast makes it enter only once?
+[[gnu::interrupt]]
+void TIM1_UP_IRQHandler(void)
+{
+    if (TIM_GetITStatus(TIM1, TIM_IT_Update) != RESET)
+    {
+        TIM_ClearITPendingBit(TIM1, TIM_IT_Update);
+        tim1_update_flag = 1;
+    }
+}
 
-#define CBWSignature (0x43425355)
-#define CSWSignature (0x53425355)
+void USBFS_RCC_Init(void)
+{
+#ifdef CH32V30x_D8C
+    RCC_USBCLK48MConfig(RCC_USBCLK48MCLKSource_USBPHY);
+    RCC_USBHSPLLCLKConfig(RCC_HSBHSPLLCLKSource_HSE);
+    RCC_USBHSConfig(RCC_USBPLL_Div2);
+    RCC_USBHSPLLCKREFCLKConfig(RCC_USBHSPLLCKREFCLK_4M);
+    RCC_USBHSPHYPLLALIVEcmd(ENABLE);
+    // THIS IS ALSO CONFIGURED BY TIM1_INT_Init
+    RCC_AHBPeriphClockCmd(RCC_AHBPeriph_USBHS, ENABLE);
+#else
+    if (SystemCoreClock == 144000000)
+    {
+        RCC_USBFSCLKConfig(RCC_USBFSCLKSource_PLLCLK_Div3);
+    }
+    else if (SystemCoreClock == 96000000)
+    {
+        RCC_USBFSCLKConfig(RCC_USBFSCLKSource_PLLCLK_Div2);
+    }
+    else if (SystemCoreClock == 48000000)
+    {
+        RCC_USBFSCLKConfig(RCC_USBFSCLKSource_PLLCLK_Div1);
+    }
+#endif
+    RCC_AHBPeriphClockCmd(RCC_AHBPeriph_USBFS, ENABLE);
+}
 
-#define INQUIRY_OP (0x12)
-#define TEST_UNIT_READY_OP (0x00)
-#define REQUEST_SENSE_OP (0x03)
-#define READ_CAPACITY_10_OP (0x25)
-#define READ_10_OP (0x28)
-#define MODE_SENSE_6_OP (0x1A)
-#define PREVENT_ALLOW_MEDIUM_REMOVAL_OP (0x1E)
-#define WRITE_10_OP (0x2A)
-#define START_STOP_UNIT_OP (0x1B)
-
-uint8_t usb_got = 0;
-
-void usb_min_init(void)
+void USBFS_MSC_INIT(void)
 {
     USBFSD->BASE_CTRL = USBFS_UC_RESET_SIE | USBFS_UC_CLR_ALL;
     Delay_Us(10);
@@ -134,285 +141,110 @@ void usb_min_init(void)
     NVIC_EnableIRQ(USBFS_IRQn);
 }
 
-volatile uint8_t tim1_update_flag = 0;
+static const device_descriptor dd = {
+    .bLength = 18,
+    .bDescriptorType = 0x01,
+    .bcdUSB = 0x0200,
 
-// Interrupt fast makes it enter only once?
-[[gnu::interrupt]]
-void TIM1_UP_IRQHandler(void)
-{
-    if (TIM_GetITStatus(TIM1, TIM_IT_Update) != RESET)
-    {
-        TIM_ClearITPendingBit(TIM1, TIM_IT_Update);
-        tim1_update_flag = 1;
-    }
-}
+    .bDeviceClass = 0x00,
+    .bDeviceSubClass = 0,
+    .bDeviceProtocol = 0,
+    .bMaxPacketSize = 64,
+    .idVendor = 0,
+    .idProduct = 0,
+    .bcdDevice = 0x0100,
 
-typedef struct __attribute__((packed))
-{
-    uint8_t bLength;
-    uint8_t bDescriptorType;
-    uint16_t bcdUSB;
-    uint8_t bDeviceClass;
-    uint8_t bDeviceSubClass;
-    uint8_t bDeviceProtocol;
-    // For EP0
-    uint8_t bMaxPacketSize;
-    uint16_t idVendor;
-    uint16_t idProduct;
-    uint16_t bcdDevice;
-    uint8_t iManufacturer;
-    uint8_t iProduct;
-    uint8_t iSerialNumber;
-    uint8_t bNumConfigurations;
-} device_descriptor;
+    .iManufacturer = 0,
+    .iProduct = 0,
+    .iSerialNumber = 0,
+    .bNumConfigurations = 1,
+};
 
-typedef struct __attribute__((packed))
-{
-    uint8_t bLength;
-    uint8_t bDescriptorType;
-    uint16_t wTotalLength;
-    uint8_t bNumInterfaces;
-    uint8_t bConfigurationValue;
-    uint8_t iConfiguration;
-    uint8_t bmAttributes;
-    uint8_t bMaxPower;
-} config_descriptor;
+static const config_descriptor cd = {
+    .bLength = 9,
+    .bDescriptorType = 0x02,
+    .wTotalLength = sizeof(config_descriptor) + sizeof(interface_descriptor) + 2 * sizeof(endpoint_descriptor), // + (endpoint, and class or vendor specific descriptors
+    .bNumInterfaces = 1,
+    .bConfigurationValue = 1,
+    .iConfiguration = 0, // No string
+    .bmAttributes = 0x80,
+    .bMaxPower = 50, // 100 mA
+};
 
-typedef struct __attribute__((packed))
-{
-    uint8_t bLength;
-    uint8_t bDescriptorType;
-    uint8_t bInterfaceNumber;
-    uint8_t bAlternateSetting;
-    uint8_t bNumEndpoints;
-    uint8_t bInterfaceClass;
-    uint8_t bInterfaceSubClass;
-    uint8_t bInterfaceProtocol;
-    uint8_t iInterface;
-} interface_descriptor;
+static const interface_descriptor id = {
+    .bLength = 9,
+    .bDescriptorType = 0x04,
+    .bInterfaceNumber = 0,
+    .bAlternateSetting = 0,
+    .bNumEndpoints = 2, // EP1 IN and OUT
+    .bInterfaceClass = 0x08,
+    .bInterfaceSubClass = 0x06,
+    .bInterfaceProtocol = 0x50,
+    .iInterface = 0,
+};
 
-typedef struct __attribute__((packed))
-{
-    uint8_t bLength;
-    uint8_t bDescriptorType;
-    uint8_t bEndpointAddress;
-    uint8_t bmAttributes;
-    uint16_t wMaxPacketSize;
-    uint8_t bInterval;
-} endpoint_descriptor;
-
-typedef struct __attribute__((packed))
-{
-    uint32_t dCBWSignature;
-    uint32_t dCBWTag;
-    uint32_t dCBWDataTransferLength;
-    uint8_t bmCBWFlags;
-    uint8_t bCBWLUN;
-    uint8_t bCBWCBLength;
-    uint8_t CBWCB[16];
-} cbw;
-
-typedef struct __attribute__((packed))
-{
-    uint32_t dCSWSignature;
-    uint32_t dCSWTag;
-    uint32_t dCSWDataResidue;
-    uint8_t bCSWStatus;
-} csw;
-
-typedef struct
-{
-    uint8_t sense_key;
-    uint8_t asc;  // Additional Sense Code
-    uint8_t ascq; // Additional Sense Code Qualifier
-} sense;
-
-typedef struct __attribute__((packed))
-{
-    uint8_t peripheral;
-    uint8_t rmb;
-    uint8_t version;
-    uint8_t resp_data_format;
-    uint8_t additional_length;
-    uint8_t flags1;
-    uint8_t flags2;
-    uint8_t flags3;
-    uint8_t vendor[8];
-    uint8_t product[16];
-    uint8_t revision[4];
-} inquiry_data;
-
-typedef struct __attribute__((packed))
-{
-    uint32_t ret_lba;
-    uint32_t block_length;
-} read_capacity_data;
-
-typedef struct __attribute__((packed))
-{
-    uint8_t mode_data_length;
-    uint8_t medium_type;
-    uint8_t device_specific_parameter;
-    uint8_t block_descriptor_length;
-} mode_parameter_header_6;
-
-sense current_sense;
-csw current_csw;
-
-static inline void set_sense(uint8_t key, uint8_t asc, uint8_t ascq)
-{
-    current_sense.sense_key = key;
-    current_sense.asc = asc;
-    current_sense.ascq = ascq;
-}
-
-static inline void device_descriptor_init(device_descriptor *dd)
-{
-    dd->bLength = 18;
-    dd->bDescriptorType = 0x01;
-    dd->bcdUSB = 0x0200;
-
-    dd->bDeviceClass = 0x00;
-    dd->bDeviceSubClass = 0;
-    dd->bDeviceProtocol = 0;
-    dd->bMaxPacketSize = 64;
-    dd->idVendor = 0;
-    dd->iProduct = 0;
-    dd->bcdDevice = 0x0100;
-
-    dd->iManufacturer = 0;
-    dd->iProduct = 0;
-    dd->iSerialNumber = 0;
-    dd->bNumConfigurations = 1;
-}
-
-static inline void config_descriptor_init(config_descriptor *cd)
-{
-    cd->bLength = 9;
-    cd->bDescriptorType = 0x02;
-    cd->wTotalLength = sizeof(config_descriptor) + sizeof(interface_descriptor) + 2 * sizeof(endpoint_descriptor); // + (endpoint, and class or vendor specific descriptors
-    cd->bNumInterfaces = 1;
-    cd->bConfigurationValue = 1;
-    cd->iConfiguration = 0; // No string
-    cd->bmAttributes = 0x80;
-    cd->bMaxPower = 50; // 100 mA
-}
-
-static inline void interface_descriptor_init(interface_descriptor *ic)
-{
-    ic->bLength = 9;
-    ic->bDescriptorType = 0x04;
-    ic->bInterfaceNumber = 0;
-    ic->bAlternateSetting = 0;
-    ic->bNumEndpoints = 2; // EP1 IN and OUT
-    ic->bInterfaceClass = 0x08;
-    ic->bInterfaceSubClass = 0x06;
-    ic->bInterfaceProtocol = 0x50;
-    ic->iInterface = 0;
-}
-
-// Bulk in only rn
-static inline void endpoint_descriptor_init(endpoint_descriptor *ed, uint8_t ep_num, uint8_t is_in)
-{
-    ed->bLength = 7;
-    ed->bDescriptorType = 0x05;
-    ed->bEndpointAddress = ((is_in & 0x01) << 7) | (ep_num & 0b1111);
-    ed->bmAttributes = 0x02; // Bulk
-    ed->wMaxPacketSize = 64;
+// Bulk in only for now
+static const endpoint_descriptor ed1_in = {
+    .bLength = 7,
+    .bDescriptorType = 0x05,
+    // In EP1
+    .bEndpointAddress = ((1 & 0x01) << 7) | (1 & 0b1111),
+    .bmAttributes = 0x02, // Bulk
+    .wMaxPacketSize = 64,
     // Ignored for Bulk & Control Endpoints
-    ed->bInterval = 0;
-}
+    .bInterval = 0,
+};
 
-static inline void inquiry_data_init(inquiry_data *id)
-{
-    id->peripheral = 0x00;
-    id->rmb = 0x80;
-    id->version = (1 << 7); // Compliant with SPC-3, but we don't support a lot of it
-    id->resp_data_format = 0x02;
-    id->additional_length = 31; // Number of bytes following this field
-    id->flags1 = 0;
-    id->flags2 = 0; // Maybe look into QUE and CMDQUE
-    id->flags3 = 0;
+static const endpoint_descriptor ed1_out = {
+    .bLength = 7,
+    .bDescriptorType = 0x05,
+    // Out EP1
+    .bEndpointAddress = ((0 & 0x01) << 7) | (1 & 0b1111),
+    .bmAttributes = 0x02, // Bulk
+    .wMaxPacketSize = 64,
+    // Ignored for Bulk & Control Endpoints
+    .bInterval = 0,
+};
 
-    memset(id->vendor, ' ', sizeof(id->vendor));
-    memset(id->product, ' ', sizeof(id->product));
-    memset(id->revision, ' ', sizeof(id->revision));
-    memcpy(id->vendor, "NONE", 4);             // 8
-    memcpy(id->product, "RISC-V SOC MSC", 15); // 16
-    memcpy(id->revision, "0.01", 4);           // 4
-}
+static const inquiry_data iq = {
+    .peripheral = 0x00,
+    .rmb = 0x80,
 
-static inline void mode_parameter_header_6_init(mode_parameter_header_6 *mph6)
-{
+    .version = (1 << 7), // Compliant with SPC-3, but we don't support a lot of it
+
+    .resp_data_format = 0x02,
+    .additional_length = 31,
+
+    .flags1 = 0,
+    .flags2 = 0, // Maybe look into QUE and CMDQUE
+    .flags3 = 0,
+
+    .vendor = "NONE    ",          // 8
+    .product = "RISC-V SOC MSC  ", // 16
+    .revision = "0.01",            // 4
+};
+
+static const mode_parameter_header_6 mph6 = {
     // Only the header
-    mph6->mode_data_length = sizeof(mode_parameter_header_6) - 1;
+    .mode_data_length = sizeof(mode_parameter_header_6) - 1,
     // Data medium?
-    mph6->medium_type = 0x00;
-    mph6->device_specific_parameter = 0x00;
+    .medium_type = 0x00,
+    .device_specific_parameter = 0x00,
     // No blocks
-    mph6->block_descriptor_length = 0;
-}
+    .block_descriptor_length = 0,
+};
 
-#define NUM_LBA (0x0036)
-#define LBA_LENGTH (0x0200)
-
-static uint8_t disk[NUM_LBA][LBA_LENGTH];
-
-static inline uint32_t l_to_b_u32(uint32_t num)
-{
-    return ((num & 0xFF000000) >> 24) | ((num & 0x00FF0000) >> 8) | ((num & 0x0000FF00) << 8) | ((num & 0x000000FF) << 24);
-}
-
-static inline void read_capacity_data_init(read_capacity_data *rcd)
-{
+static const read_capacity_data rcd = {
     // Big endian nums
-    rcd->ret_lba = l_to_b_u32(NUM_LBA - 1);
-    rcd->block_length = l_to_b_u32(LBA_LENGTH);
-}
+    .ret_lba = __builtin_bswap32(NUM_LBA - 1),
+    .block_length = __builtin_bswap32(LBA_LENGTH),
+};
 
-uint8_t before_csw = 0;
 uint64_t total_bytes = 0;
 uint64_t sent_bytes = 0;
 uint64_t received_bytes = 0;
 uint64_t start_LBA = 0;
 uint32_t cbw_tag = 0;
-
-static inline uint8_t validCBW(cbw *CBW)
-{
-    if (CBW->dCBWSignature != CBWSignature || USBFSD->RX_LEN != sizeof(cbw) || before_csw)
-        return 0;
-    return 1;
-}
-
-static inline uint8_t meaningfulCBW(cbw *CBW)
-{
-    if (((CBW->bCBWLUN & 0xF0) != 0) || ((CBW->bCBWCBLength & 0xE0) != 0) || CBW->bCBWLUN != 0)
-        return 0;
-
-    // Check if the command is supported
-    switch (CBW->CBWCB[0])
-    {
-    case INQUIRY_OP:
-    case TEST_UNIT_READY_OP:
-    case REQUEST_SENSE_OP:
-    case READ_CAPACITY_10_OP:
-    case READ_10_OP:
-    case MODE_SENSE_6_OP:
-    case PREVENT_ALLOW_MEDIUM_REMOVAL_OP:
-    case WRITE_10_OP:
-    case START_STOP_UNIT_OP:
-        return 1;
-
-    default:
-        return 0;
-    }
-}
-
-device_descriptor dd;
-config_descriptor cd;
-interface_descriptor id;
-endpoint_descriptor ed1_out;
-endpoint_descriptor ed1_in;
 
 uint8_t dev_addr = 0;
 uint8_t send_len = sizeof(device_descriptor);
@@ -422,8 +254,11 @@ uint8_t config_stage = 0;
 uint8_t configured = 0;
 uint8_t bot_stage = 0;
 uint8_t write_stage = 0;
-
 uint8_t prevent_medium_removal;
+
+csw current_csw;
+
+static volatile uint8_t usb_update_flag = 0;
 
 [[gnu::interrupt]]
 void USBFS_IRQHandler(void)
@@ -688,8 +523,6 @@ void USBFS_IRQHandler(void)
                         current_csw.dCSWDataResidue = CBW.dCBWDataTransferLength - data_to_transfer;
                         current_csw.bCSWStatus = 0x00;
 
-                        inquiry_data iq;
-                        inquiry_data_init(&iq);
                         memcpy(EP1_TX_BUF, &iq, sizeof(inquiry_data));
                         USBFSD->UEP1_TX_LEN = data_to_transfer;
                         USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
@@ -733,8 +566,6 @@ void USBFS_IRQHandler(void)
                         current_csw.dCSWDataResidue = 0; // CBW.dCBWDataTransferLength - data_to_transfer
                         current_csw.bCSWStatus = 0x00;
 
-                        read_capacity_data rcd;
-                        read_capacity_data_init(&rcd);
                         memcpy(EP1_TX_BUF, &rcd, data_to_transfer);
                         USBFSD->UEP1_TX_LEN = data_to_transfer;
                         USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
@@ -844,9 +675,6 @@ void USBFS_IRQHandler(void)
                         // Short transfer!
                         current_csw.dCSWDataResidue = CBW.dCBWDataTransferLength - data_to_transfer;
                         current_csw.bCSWStatus = 0x00;
-
-                        mode_parameter_header_6 mph6;
-                        mode_parameter_header_6_init(&mph6);
 
                         memcpy(EP1_TX_BUF, &mph6, data_to_transfer);
                         USBFSD->UEP1_TX_LEN = data_to_transfer;
@@ -1087,15 +915,10 @@ int main(void)
 
     USBFS_RCC_Init();
     printf("USBFS clock config done\r\n");
-    device_descriptor_init(&dd);
-    config_descriptor_init(&cd);
-    interface_descriptor_init(&id);
-    endpoint_descriptor_init(&ed1_out, 1, 0);
-    endpoint_descriptor_init(&ed1_in, 1, 1);
 
     memset(disk, 0, NUM_LBA * LBA_LENGTH);
 
-    usb_min_init();
+    USBFS_MSC_INIT();
 
     printf("USBFS device init done\r\n");
 
@@ -1108,9 +931,9 @@ int main(void)
             printf(".\r\n");
         }
 
-        if (usb_got)
+        if (usb_update_flag)
         {
-            usb_got = 0;
+            usb_update_flag = 0;
             // printf("\r\n");
         }
     }
