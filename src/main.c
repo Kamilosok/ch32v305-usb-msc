@@ -14,10 +14,20 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
-#define NUM_LBA (0x0036)
-#define LBA_LENGTH (0x0200)
+#define FLASH_PAGE_SIZE (256u)
+#define STORAGE_PAGE_FIRST (256u)
+#define STORAGE_PAGE_LAST (496u)
 
-static uint8_t disk[NUM_LBA][LBA_LENGTH];
+#define NUM_LBA (0x0080u)
+#define PAGE_LENGTH (0x0100u)
+#define LBA_LENGTH (0x0200u)
+
+#define STORAGE_BASE (0x08000000u + STORAGE_PAGE_FIRST * FLASH_PAGE_SIZE)
+#define STORAGE_SIZE (NUM_LBA * PAGE_LENGTH)
+
+#define ERASED_WORD (0xe339e339)
+
+static __attribute__((aligned(4))) uint8_t page_cache[PAGE_LENGTH];
 
 static __attribute__((aligned(4))) uint8_t ep0_buf[64];
 static __attribute__((aligned(4))) uint8_t ep1_buf[128];
@@ -391,26 +401,52 @@ void USBFS_IRQHandler(void)
                     // Potentially slow
                     uint16_t chunk1 = (total_bytes - received_bytes > 64) ? 64 : (total_bytes - received_bytes);
                     uint16_t chunk2 = 0;
-                    uint64_t curr_LBA = start_LBA + received_bytes / LBA_LENGTH;
-                    uint16_t off_in_block = received_bytes % LBA_LENGTH;
+                    uint32_t curr_PAGE = 2 * start_LBA + received_bytes / PAGE_LENGTH;
+                    uint16_t off_in_page = received_bytes % PAGE_LENGTH;
+                    uint32_t page_addr = STORAGE_BASE + (STORAGE_PAGE_FIRST + curr_PAGE) * PAGE_LENGTH;
 
-                    if (off_in_block + chunk1 > LBA_LENGTH)
+                    if (off_in_page + chunk1 >= PAGE_LENGTH)
                     {
-                        chunk2 = off_in_block + chunk1 - LBA_LENGTH;
+                        chunk2 = off_in_page + chunk1 - PAGE_LENGTH;
                         chunk1 -= chunk2;
-                    }
 
-                    memcpy(disk[curr_LBA] + off_in_block, EP1_RX_BUF, chunk1);
-                    if (curr_LBA < NUM_LBA - 1)
-                        memcpy(disk[curr_LBA + 1], EP1_RX_BUF + chunk1, chunk2);
+                        memcpy(page_cache + off_in_page, EP1_RX_BUF, chunk1);
+
+                        __disable_irq();
+                        FLASH_Unlock_Fast();
+                        FLASH_ErasePage_Fast(page_addr);
+                        FLASH_ProgramPage_Fast(page_addr, (uint32_t *)page_cache);
+                        FLASH_Lock_Fast();
+                        __enable_irq();
+
+                        memcpy(page_cache, EP1_RX_BUF + chunk1, chunk2);
+                    }
                     else
-                        printf("WRITING TOO FAR\r\n");
+                    {
+                        memcpy(page_cache + off_in_page, EP1_RX_BUF, chunk1);
+                    }
 
                     received_bytes += chunk1 + chunk2;
                     current_csw.dCSWDataResidue = total_bytes - received_bytes;
 
                     if (total_bytes == received_bytes)
                     {
+                        if ((received_bytes % PAGE_LENGTH) != 0)
+                        {
+                            // Get the page data
+                            __attribute__((aligned(4))) uint8_t prev_page[PAGE_LENGTH];
+                            memcpy(prev_page, (uint8_t *)page_addr, PAGE_LENGTH);
+
+                            // Update it by the chunk
+                            memcpy(prev_page, page_cache, off_in_page + chunk1);
+                            __disable_irq();
+                            FLASH_Unlock_Fast();
+                            FLASH_ErasePage_Fast(page_addr);
+                            FLASH_ProgramPage_Fast(page_addr, (uint32_t *)prev_page);
+                            FLASH_Lock_Fast();
+                            __enable_irq();
+                        }
+
                         write_stage = 0;
                         before_csw = 0;
                         total_bytes = 0;
@@ -562,7 +598,7 @@ void USBFS_IRQHandler(void)
                         }
 
                         set_sense(0, 0, 0);
-                        data_to_transfer = MIN(sizeof(read_capacity_data), CBW.dCBWDataTransferLength);
+                        data_to_transfer = CBW.dCBWDataTransferLength;
                         current_csw.dCSWDataResidue = 0; // CBW.dCBWDataTransferLength - data_to_transfer
                         current_csw.bCSWStatus = 0x00;
 
@@ -630,14 +666,18 @@ void USBFS_IRQHandler(void)
                             sent_bytes = 0;
 
                             set_sense(0, 0, 0);
-                            data_to_transfer = MIN(sizeof(read_capacity_data), CBW.dCBWDataTransferLength);
+                            data_to_transfer = CBW.dCBWDataTransferLength;
                             current_csw.dCSWDataResidue = (uint32_t)(total_bytes - sent_bytes);
                             current_csw.bCSWStatus = 0x00;
 
                             // Data stage
                             uint16_t chunk = (total_bytes > 64) ? 64 : total_bytes;
 
-                            memcpy(EP1_TX_BUF, disk[start_LBA], chunk);
+                            uint8_t *read_addr = (uint8_t *)(STORAGE_BASE + (STORAGE_PAGE_FIRST + start_LBA * 2) * PAGE_LENGTH);
+
+                            memcpy(page_cache, read_addr, PAGE_LENGTH);
+
+                            memcpy(EP1_TX_BUF, page_cache, chunk);
                             USBFSD->UEP1_TX_LEN = chunk;
                             sent_bytes += chunk;
 
@@ -860,22 +900,24 @@ void USBFS_IRQHandler(void)
                         //  Potentially slow
                         uint16_t chunk1 = (total_bytes - sent_bytes > 64) ? 64 : (total_bytes - sent_bytes);
                         uint16_t chunk2 = 0;
-                        uint64_t curr_LBA = start_LBA + sent_bytes / LBA_LENGTH;
-                        uint16_t off_in_block = sent_bytes % 512;
+                        uint64_t curr_PAGE = start_LBA * 2 + sent_bytes / PAGE_LENGTH;
+                        uint16_t off_in_page = sent_bytes % PAGE_LENGTH;
 
-                        if (off_in_block + chunk1 > LBA_LENGTH)
+                        if (off_in_page + chunk1 >= PAGE_LENGTH)
                         {
-                            chunk2 = off_in_block + chunk1 - LBA_LENGTH;
+                            chunk2 = off_in_page + chunk1 - PAGE_LENGTH;
                             chunk1 -= chunk2;
+
+                            memcpy(EP1_TX_BUF, page_cache + off_in_page, chunk1);
+
+                            memcpy(page_cache, (uint8_t *)(STORAGE_BASE + (STORAGE_PAGE_FIRST + curr_PAGE + 1) * PAGE_LENGTH), PAGE_LENGTH);
+
+                            memcpy(EP1_TX_BUF + chunk1, page_cache, chunk2);
                         }
-
-                        // printf("Reading from LBA %llu at offset %u %u bytes\r\n", curr_LBA, off_in_block, chunk1);
-
-                        memcpy(EP1_TX_BUF, disk[curr_LBA] + off_in_block, chunk1);
-                        if (curr_LBA < NUM_LBA - 1)
-                            memcpy(EP1_TX_BUF + chunk1, disk[curr_LBA + 1], chunk2);
                         else
-                            printf("READING TOO FAR\r\n");
+                        {
+                            memcpy(EP1_TX_BUF, page_cache + off_in_page, chunk1);
+                        }
 
                         USBFSD->UEP1_TX_LEN = chunk1 + chunk2;
                         sent_bytes += chunk1 + chunk2;
@@ -916,7 +958,14 @@ int main(void)
     USBFS_RCC_Init();
     printf("USBFS clock config done\r\n");
 
-    memset(disk, 0, NUM_LBA * LBA_LENGTH);
+    memset(page_cache, 0, PAGE_LENGTH);
+
+    // Nuclear option
+    /*
+    FLASH_Unlock();
+
+    FLASH_EraseAllPages();
+    */
 
     USBFS_MSC_INIT();
 

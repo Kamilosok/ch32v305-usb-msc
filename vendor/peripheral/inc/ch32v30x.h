@@ -6612,7 +6612,8 @@ extern "C"
 #include "ch32v30x_usart.h"
 #include "ch32v30x_gpio.h"
 #include "ch32v30x_dbgmcu.h"
-#include <ch32v30x_usb.h>
+#include "ch32v30x_usb.h"
+#include "ch32v30x_flash.h"
 
 #ifdef __cplusplus
 }
