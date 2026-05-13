@@ -89,11 +89,6 @@ lst: $(BUILD_DIR)/$(TARGET).elf
 flash: $(BUILD_DIR)/$(TARGET).bin
 	wchisp flash $<
 
-DEV ?= /dev/sda
-# Write the image of a filesystem
-image:
-	./scripts/fs_image.sh $(DEV)
-
 # Clean
 clean:
 	rm -rf $(BUILD_DIR)
