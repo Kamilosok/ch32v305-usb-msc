@@ -1,9 +1,9 @@
 TARGET     = main
 MCU        = ch32v305
-ARCH       = rv32imac_zicsr_zifencei
+ARCH       = rv32imacf_zicsr_zifencei
 ABI        = ilp32
 
-CPU_FREQ   = 144000000
+CPU_FREQ   = 48000000
 
 OPTS       = -O2
 DEFS       =

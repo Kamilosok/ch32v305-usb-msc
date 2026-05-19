@@ -7,6 +7,8 @@
 
 #include <inttypes.h>
 
+#define USB_GET_MAX_LUN (0xFE)
+
 typedef struct __attribute__((packed))
 {
     uint8_t bLength;

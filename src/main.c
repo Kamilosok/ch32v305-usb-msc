@@ -14,15 +14,15 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
-#define FLASH_PAGE_SIZE (256u)
-#define STORAGE_PAGE_FIRST (256u)
-#define STORAGE_PAGE_LAST (496u)
+#define FLASH_PAGE_SIZE (256ul)
+#define STORAGE_PAGE_FIRST (256ul)
+#define STORAGE_PAGE_LAST (496ul)
 
-#define NUM_LBA (0x0080u)
-#define PAGE_LENGTH (0x0100u)
-#define LBA_LENGTH (0x0200u)
+#define NUM_LBA (0x0080ul)
+#define PAGE_LENGTH (0x0100ul)
+#define LBA_LENGTH (0x0200ul)
 
-#define STORAGE_BASE (0x08000000u + STORAGE_PAGE_FIRST * FLASH_PAGE_SIZE)
+#define STORAGE_BASE (0x08000000ul + STORAGE_PAGE_FIRST * FLASH_PAGE_SIZE)
 #define STORAGE_SIZE (NUM_LBA * PAGE_LENGTH)
 
 #define ERASED_WORD (0xe339e339)
@@ -266,6 +266,8 @@ uint8_t bot_stage = 0;
 uint8_t write_stage = 0;
 uint8_t prevent_medium_removal;
 
+uint32_t first_invalid_lba = 0;
+
 csw current_csw;
 
 static volatile uint8_t usb_update_flag = 0;
@@ -273,9 +275,9 @@ static volatile uint8_t usb_update_flag = 0;
 [[gnu::interrupt]]
 void USBFS_IRQHandler(void)
 {
-    uint16_t len, wValue, wIndex, wLength;
+    uint16_t __attribute__((unused)) len, wValue, __attribute__((unused)) wIndex, wLength;
     uint8_t bmRequestType, bRequest;
-    uint8_t intflag, stflag, errflag = 0;
+    uint8_t intflag, stflag, __attribute__((unused)) errflag = 0;
 
     intflag = USBFSD->INT_FG;
     stflag = USBFSD->INT_ST;
@@ -286,7 +288,8 @@ void USBFS_IRQHandler(void)
     {
         if (endp == 0 || !configured)
         {
-            // 0x80 -> Device to Host to standard device
+            // printf("EP0\r\n");
+            //  0x80 -> Device to Host to standard device
             bmRequestType = ep0_buf[0];
             // 0x06 -> Get descriptor
             bRequest = ep0_buf[1];
@@ -354,7 +357,6 @@ void USBFS_IRQHandler(void)
                 }
                 else if (bmRequestType == 0x00 && bRequest == USB_SET_CONFIGURATION)
                 {
-
                     // We only have 1 configuration, so we ignore wValue
                     uint8_t config_value = wValue;
                     configured = 1;
@@ -363,10 +365,17 @@ void USBFS_IRQHandler(void)
                     USBFSD->UEP0_TX_CTRL = USBFS_UEP_T_TOG | USBFS_UEP_T_RES_ACK;
                     printf("%u SET CONFIG\r\n", config_value);
                 }
+                else if (bmRequestType == 0xa1 && bRequest == USB_GET_MAX_LUN)
+                {
+                    uint8_t max_lun = 0;
+                    USBFSD->UEP0_TX_LEN = 1;
+                    memcpy(EP1_TX_BUF, &max_lun, 1);
+                    USBFSD->UEP0_TX_CTRL = USBFS_UEP_T_TOG | USBFS_UEP_T_RES_ACK;
+                }
                 else
                 {
-                    // Somehow getting here?
                     printf("BAD\r\n");
+                    printf("bmRequest %x bRequest %x wValue %x\r\n", bmRequestType, bRequest, wValue);
                 }
             }
             else if ((stflag & USBFS_UIS_TOKEN_MASK) == USBFS_UIS_TOKEN_IN)
@@ -489,7 +498,16 @@ void USBFS_IRQHandler(void)
                     {
                         printf("Unmeaningful CBW\r\n");
 
-                        set_sense(0x05, 0x20, 0x00);
+                        // The response of a device to a CBW that is not meaningful is not specified
+                        USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_STALL;
+                        USBFSD->UEP1_RX_CTRL = ((USBFSD->UEP1_RX_CTRL) & ~0b11) | USBFS_UEP_R_RES_STALL;
+                    }
+
+                    if (!command_supported(CBW.CBWCB[0]))
+                    {
+                        set_sense(0x05, 0x20, 0x00, 0);
+                        set_field_pointer(0);
+
                         instaCSW.dCSWDataResidue = CBW.dCBWDataTransferLength;
                         instaCSW.bCSWStatus = 0x01;
 
@@ -502,7 +520,7 @@ void USBFS_IRQHandler(void)
 
                     before_csw = 1;
 
-                    // printf("CBCW:\r\n");
+                    // printf("CBWCB:\r\n");
 
                     for (int i = 0; i < CBW.bCBWCBLength; i++)
                     {
@@ -527,7 +545,8 @@ void USBFS_IRQHandler(void)
                         // No support for Vital Product Data
                         if (evpd != 0)
                         {
-                            set_sense(0x05, 0x20, 0x00);
+                            set_sense(0x05, 0x20, 0x00, 0);
+                            set_error_pointers(0, 1);
                             instaCSW.dCSWDataResidue = CBW.dCBWDataTransferLength;
                             instaCSW.bCSWStatus = 0x01;
 
@@ -540,7 +559,8 @@ void USBFS_IRQHandler(void)
 
                         if (page_code != 0)
                         {
-                            set_sense(0x05, 0x24, 0x00);
+                            set_sense(0x05, 0x24, 0x00, 0);
+                            set_field_pointer(2);
                             instaCSW.dCSWDataResidue = CBW.dCBWDataTransferLength;
                             instaCSW.bCSWStatus = 0x01;
 
@@ -553,7 +573,7 @@ void USBFS_IRQHandler(void)
 
                         // If data_to_transfer > uint16_max 4.3.4.6
 
-                        set_sense(0, 0, 0);
+                        set_sense(0, 0, 0, 0);
 
                         data_to_transfer = MIN(sizeof(inquiry_data), MIN(alloc_len, CBW.dCBWDataTransferLength));
                         current_csw.dCSWDataResidue = CBW.dCBWDataTransferLength - data_to_transfer;
@@ -584,9 +604,11 @@ void USBFS_IRQHandler(void)
                         uint8_t pmi = CBW.CBWCB[8] & 0x01;
 
                         // No pmi=1 handling for now
-                        if (LBA != 0 || pmi != 0)
+                        if (pmi != 0 || LBA != 0)
                         {
-                            set_sense(0x05, 0x24, 0x00);
+                            set_sense(0x05, 0x24, 0x00, 0);
+                            set_field_pointer(2);
+
                             instaCSW.dCSWDataResidue = CBW.dCBWDataTransferLength;
                             instaCSW.bCSWStatus = 0x01;
 
@@ -597,7 +619,7 @@ void USBFS_IRQHandler(void)
                             nice_return;
                         }
 
-                        set_sense(0, 0, 0);
+                        set_sense(0, 0, 0, 0);
                         data_to_transfer = CBW.dCBWDataTransferLength;
                         current_csw.dCSWDataResidue = 0; // CBW.dCBWDataTransferLength - data_to_transfer
                         current_csw.bCSWStatus = 0x00;
@@ -619,7 +641,8 @@ void USBFS_IRQHandler(void)
                         // Any protection code except 000 we don't support
                         if (flags & 0b11100000)
                         {
-                            set_sense(0x05, 0x24, 0x00);
+                            set_sense(0x05, 0x24, 0x00, 0);
+                            set_error_pointers(7, 1);
                             instaCSW.dCSWDataResidue = CBW.dCBWDataTransferLength;
                             instaCSW.bCSWStatus = 0x01;
 
@@ -635,7 +658,14 @@ void USBFS_IRQHandler(void)
 
                         if (LBA + transfer_length > NUM_LBA)
                         {
-                            set_sense(0x05, 0x21, 0x00);
+                            set_sense(0x05, 0x21, 0x00, 0);
+                            set_field_pointer(2);
+
+                            if (LBA >= NUM_LBA)
+                                first_invalid_lba = LBA;
+                            else
+                                first_invalid_lba = NUM_LBA;
+
                             instaCSW.dCSWDataResidue = CBW.dCBWDataTransferLength;
                             instaCSW.bCSWStatus = 0x01;
 
@@ -665,7 +695,7 @@ void USBFS_IRQHandler(void)
                             total_bytes = transfer_length * LBA_LENGTH;
                             sent_bytes = 0;
 
-                            set_sense(0, 0, 0);
+                            set_sense(0, 0, 0, 0);
                             data_to_transfer = CBW.dCBWDataTransferLength;
                             current_csw.dCSWDataResidue = (uint32_t)(total_bytes - sent_bytes);
                             current_csw.bCSWStatus = 0x00;
@@ -673,7 +703,7 @@ void USBFS_IRQHandler(void)
                             // Data stage
                             uint16_t chunk = (total_bytes > 64) ? 64 : total_bytes;
 
-                            uint8_t *read_addr = (uint8_t *)(STORAGE_BASE + (STORAGE_PAGE_FIRST + start_LBA * 2) * PAGE_LENGTH);
+                            uint8_t *read_addr = (uint8_t *)(uintptr_t)(STORAGE_BASE + (STORAGE_PAGE_FIRST + start_LBA * 2) * PAGE_LENGTH);
 
                             memcpy(page_cache, read_addr, PAGE_LENGTH);
 
@@ -696,10 +726,26 @@ void USBFS_IRQHandler(void)
 
                         // Ignore pc because no mode pages
 
-                        // Error on any page code we don't support + exception
-                        if (((pc_pg & 0x3F) != 0x3F || subpage_code != 0x00) && pc_pg != 0)
+                        uint8_t page_error = 0;
+                        if (pc_pg != 0)
                         {
-                            set_sense(0x05, 0x24, 0x00);
+                            if (subpage_code != 0x00)
+                            {
+                                set_field_pointer(3);
+                                page_error = 1;
+                            }
+
+                            if ((pc_pg & 0x3F) != 0x3F)
+                            {
+                                page_error = 1;
+                                set_field_pointer(2);
+                            }
+                        }
+                        // Error on any page code we don't support + exception (Potential conflict with more pages)
+                        if (page_error)
+                        {
+                            set_sense(0x05, 0x24, 0x00, 0);
+
                             instaCSW.dCSWDataResidue = CBW.dCBWDataTransferLength;
                             instaCSW.bCSWStatus = 0x01;
 
@@ -710,7 +756,7 @@ void USBFS_IRQHandler(void)
                             nice_return;
                         }
 
-                        set_sense(0, 0, 0);
+                        set_sense(0, 0, 0, 0);
                         data_to_transfer = MIN(sizeof(mode_parameter_header_6), MIN(allocation_len, CBW.dCBWDataTransferLength));
                         // Short transfer!
                         current_csw.dCSWDataResidue = CBW.dCBWDataTransferLength - data_to_transfer;
@@ -730,7 +776,7 @@ void USBFS_IRQHandler(void)
                         // No handling for now
                         prevent_medium_removal = CBW.CBWCB[4] & 0b11;
 
-                        set_sense(0, 0, 0);
+                        set_sense(0, 0, 0, 0);
                         instaCSW.dCSWDataResidue = 0;
                         instaCSW.bCSWStatus = 0x00;
 
@@ -750,7 +796,8 @@ void USBFS_IRQHandler(void)
                         // Any protection code except 000 we don't support
                         if (flags_w & 0b11100000)
                         {
-                            set_sense(0x05, 0x24, 0x00);
+                            set_sense(0x05, 0x24, 0x00, 0);
+                            set_error_pointers(7, 1);
                             instaCSW.dCSWDataResidue = CBW.dCBWDataTransferLength;
                             instaCSW.bCSWStatus = 0x01;
 
@@ -766,7 +813,14 @@ void USBFS_IRQHandler(void)
 
                         if (LBA + transfer_length_w > NUM_LBA)
                         {
-                            set_sense(0x05, 0x21, 0x00);
+                            set_sense(0x05, 0x21, 0x00, 0);
+                            set_field_pointer(2);
+
+                            if (LBA >= NUM_LBA)
+                                first_invalid_lba = LBA;
+                            else
+                                first_invalid_lba = NUM_LBA;
+
                             instaCSW.dCSWDataResidue = CBW.dCBWDataTransferLength;
                             instaCSW.bCSWStatus = 0x01;
 
@@ -797,7 +851,7 @@ void USBFS_IRQHandler(void)
                             total_bytes = transfer_length_w * LBA_LENGTH;
                             received_bytes = 0;
 
-                            set_sense(0, 0, 0);
+                            set_sense(0, 0, 0, 0);
                             // Changed later only on short transfers
                             current_csw.dCSWDataResidue = (uint32_t)(total_bytes - received_bytes);
                             current_csw.bCSWStatus = 0x00;
@@ -813,7 +867,7 @@ void USBFS_IRQHandler(void)
 
                         if (immed)
                         {
-                            set_sense(0, 0, 0);
+                            set_sense(0, 0, 0, 0);
                             instaCSW.dCSWDataResidue = 0;
                             instaCSW.bCSWStatus = 0x00;
 
@@ -832,9 +886,10 @@ void USBFS_IRQHandler(void)
                         if ((ssu_flags >> 4) > 0)
                         {
                             /* We don't support changing to o ACTIVE, IDLE, STANDBY or (o FORCE_IDLE_0 or FORCE_STANDBY_0)
-                             *So everything is treated as an error
+                             * So everything is treated as an error
                              */
-                            set_sense(0x05, 0x24, 0x00);
+                            set_sense(0x05, 0x24, 0x00, 0);
+                            set_error_pointers(7, 4);
                             instaCSW.dCSWDataResidue = CBW.dCBWDataTransferLength;
                             instaCSW.bCSWStatus = 0x01;
 
@@ -853,7 +908,7 @@ void USBFS_IRQHandler(void)
                             ; // Active power condition + timers
                         else
                             ; // Stopped power condition + timers
-                        set_sense(0, 0, 0);
+                        set_sense(0, 0, 0, 0);
                         instaCSW.dCSWDataResidue = 0;
                         instaCSW.bCSWStatus = 0x00;
 
@@ -863,9 +918,94 @@ void USBFS_IRQHandler(void)
 
                         nice_return;
 
-                    // TODO: Host asks for sense data if something is wrong
                     case REQUEST_SENSE_OP:
                         printf("Request Sense\r\n");
+
+                        uint8_t desc = CBW.CBWCB[1] & 0b1;
+                        // We don't support descriptor format sense data, so just send fixed sense data
+                        if (desc)
+                            printf("Unsupported descriptor format sense data!\r\n");
+
+                        fixed_sense_data fsd;
+
+                        const sense *sense = get_sense();
+
+                        // Valid
+                        fsd.response_code = 0b10000000;
+
+                        if (sense->deferred)
+                            fsd.response_code |= 0x71;
+                        else
+                            fsd.response_code |= 0x70;
+
+                        // Ignore filemarks - we don't have them, ignore EOM and ILI - no rules to report
+                        fsd.flags_key = sense->sense_key;
+                        fsd.asc = sense->asc;
+                        fsd.ascq = sense->ascq;
+
+                        /* The only commands with any INFORMATION field interaction we support are
+                         * READ(10) and WRITE(10), so this is the only situation for writing to this field
+                         */
+                        if (first_invalid_lba)
+                        {
+                            uint32_t v = __builtin_bswap32(first_invalid_lba);
+                            memcpy(fsd.info, &v, 4);
+                            first_invalid_lba = 0;
+                        }
+
+                        // No additional sense bytes
+                        fsd.add_sense_length = 10;
+
+                        // No commands which need cmd_spec_info supported
+                        fsd.cmd_spec_info[0] = 0;
+                        fsd.cmd_spec_info[1] = 0;
+                        fsd.cmd_spec_info[2] = 0;
+                        fsd.cmd_spec_info[3] = 0;
+
+                        // No VPD
+                        fsd.f_r_unit_code = 0;
+
+                        switch (sense->sense_key)
+                        {
+                        // ILLEGAL REQUEST (maybe define them laetr)
+                        case 0x05:
+                            // SKSV 1 - valid, C/D 1 - no payload error handling for now
+                            fsd.sense_key_spec[0] = 0b11000000;
+
+                            // If bit pointer exists BPV 1 - valid
+                            if (sense->bpv)
+                            {
+                                fsd.sense_key_spec[0] |= 0b1000;
+                                fsd.sense_key_spec[0] |= sense->bit_pointer;
+                            }
+
+                            uint16_t v = sense->field_pointer;
+                            memcpy(&fsd.sense_key_spec[1], &v, 2);
+
+                            // TODO: Proper bit/byte error setting everywhere
+                            break;
+
+                        case 0x00:
+                            fsd.sense_key_spec[0] = 0b10000000;
+                            // Our transactions always finish immediately
+                            fsd.sense_key_spec[1] = 0xFF;
+                            fsd.sense_key_spec[2] = 0xFF;
+                            break;
+
+                        default:
+                            // SKSV - 0
+                            fsd.sense_key_spec[0] = 0;
+                            fsd.sense_key_spec[1] = 0;
+                            fsd.sense_key_spec[2] = 0;
+                        }
+
+                        current_csw.dCSWDataResidue = 0;
+                        current_csw.bCSWStatus = 0x00;
+
+                        memcpy(EP1_TX_BUF, &fsd, sizeof(fixed_sense_data));
+                        USBFSD->UEP1_TX_LEN = sizeof(fixed_sense_data);
+
+                        USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
 
                         nice_return;
 
@@ -910,7 +1050,7 @@ void USBFS_IRQHandler(void)
 
                             memcpy(EP1_TX_BUF, page_cache + off_in_page, chunk1);
 
-                            memcpy(page_cache, (uint8_t *)(STORAGE_BASE + (STORAGE_PAGE_FIRST + curr_PAGE + 1) * PAGE_LENGTH), PAGE_LENGTH);
+                            memcpy(page_cache, (uint8_t *)(uintptr_t)(STORAGE_BASE + (STORAGE_PAGE_FIRST + curr_PAGE + 1) * PAGE_LENGTH), PAGE_LENGTH);
 
                             memcpy(EP1_TX_BUF + chunk1, page_cache, chunk2);
                         }
