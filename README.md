@@ -32,6 +32,7 @@ Due to FLASH erase granularity limitations:
 ```bash
 ├── include         # USB MSC, SCSI, and USB headers
 ├── platform        # Platform-specific startup, linker, and system initialization code
+├── scripts         # Scripts for testing
 ├── src             # Main program and protocol and implementation source
 ├── vendor          # Vendor-provided WCH core and peripheral libraries
 ├── LICENSE         # Project license

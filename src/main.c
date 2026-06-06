@@ -982,7 +982,6 @@ void USBFS_IRQHandler(void)
                             uint16_t v = sense->field_pointer;
                             memcpy(&fsd.sense_key_spec[1], &v, 2);
 
-                            // TODO: Proper bit/byte error setting everywhere
                             break;
 
                         case 0x00:
