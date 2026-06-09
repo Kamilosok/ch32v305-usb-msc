@@ -35,3 +35,5 @@ extern uint8_t before_csw;
 uint8_t validCBW(cbw *CBW);
 
 uint8_t meaningfulCBW(cbw *CBW);
+
+const uint8_t *get_max_LUN();

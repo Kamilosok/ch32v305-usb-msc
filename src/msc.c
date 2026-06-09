@@ -9,6 +9,7 @@
 #include <ch32v30x.h>
 
 uint8_t before_csw = 0;
+const uint8_t max_lun = 0;
 
 // out_field specifies which byte was erroneous
 uint8_t validCBW(cbw *CBW)
@@ -24,4 +25,9 @@ uint8_t meaningfulCBW(cbw *CBW)
         return 0;
 
     return 1;
+}
+
+const uint8_t *get_max_LUN()
+{
+    return (const uint8_t *)&max_lun;
 }

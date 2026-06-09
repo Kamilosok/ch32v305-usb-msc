@@ -164,6 +164,7 @@ static const device_descriptor dd = {
     .idProduct = 0,
     .bcdDevice = 0x0100,
 
+    // Change iSerial when adding win
     .iManufacturer = 0,
     .iProduct = 0,
     .iSerialNumber = 0,
@@ -367,9 +368,8 @@ void USBFS_IRQHandler(void)
                 }
                 else if (bmRequestType == 0xa1 && bRequest == USB_GET_MAX_LUN)
                 {
-                    uint8_t max_lun = 0;
                     USBFSD->UEP0_TX_LEN = 1;
-                    memcpy(EP1_TX_BUF, &max_lun, 1);
+                    memcpy(ep0_buf, get_max_LUN(), 1);
                     USBFSD->UEP0_TX_CTRL = USBFS_UEP_T_TOG | USBFS_UEP_T_RES_ACK;
                 }
                 else
