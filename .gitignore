@@ -56,6 +56,5 @@ dkms.conf
 *.dwo
 
 # additional
-*.pdf
 *.txt
 *.json

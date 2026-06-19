@@ -38,7 +38,8 @@ Due to FLASH erase granularity limitations:
 ├── LICENSE         # Project license
 ├── Makefile        # Build system
 ├── README.md       # This file
-└── THIRD_PARTY.md  # Third-party disclaimer and licensing notes
+├── THIRD_PARTY.md  # Third-party disclaimer and licensing notes
+└── Thesis.pdf      # The thesis this project supports
 ```
 
 ## Usage
@@ -77,4 +78,4 @@ The code in the `/platform` and `/vendor` directories is licensed separately, fo
 
 ## Academic context
 
-This project also serves as the practical component of my bachelor's thesis conducted at Univeristy of Wrocław.
+This project also serves as the practical component of my bachelor's thesis provided in `Thesis.pdf` conducted at Univeristy of Wrocław. The thesis is written in polish.
