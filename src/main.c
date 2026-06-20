@@ -11,6 +11,14 @@
 #include <msc.h>
 #include <scsi.h>
 
+// DEBUG is already taken
+#ifndef DO_DEBUG
+#define printf(...) \
+    do              \
+    {               \
+    } while (0)
+#endif
+
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
@@ -76,7 +84,6 @@ void TIM1_INT_Init(u16 arr, u16 psc)
 
 static volatile uint8_t tim1_update_flag = 0;
 
-// Interrupt fast makes it enter only once?
 [[gnu::interrupt]]
 void TIM1_UP_IRQHandler(void)
 {
@@ -255,7 +262,6 @@ uint64_t total_bytes = 0;
 uint64_t sent_bytes = 0;
 uint64_t received_bytes = 0;
 uint64_t start_LBA = 0;
-uint32_t cbw_tag = 0;
 
 uint8_t dev_addr = 0;
 uint8_t send_len = sizeof(device_descriptor);
@@ -290,15 +296,10 @@ void USBFS_IRQHandler(void)
         if (endp == 0 || !configured)
         {
             // printf("EP0\r\n");
-            //  0x80 -> Device to Host to standard device
             bmRequestType = ep0_buf[0];
-            // 0x06 -> Get descriptor
             bRequest = ep0_buf[1];
-            // 0x0100 -> Device descriptor
             wValue = (ep0_buf[3] << 8) + ep0_buf[2];
-            // 0x0000 -> Index 0
             wIndex = (ep0_buf[5] << 8) + ep0_buf[4];
-            // 0x0040 -> 64 bytes
             wLength = (ep0_buf[7] << 8) + ep0_buf[6];
 
             if ((stflag & USBFS_UIS_TOKEN_MASK) == USBFS_UIS_TOKEN_SETUP)
@@ -457,7 +458,7 @@ void USBFS_IRQHandler(void)
                         }
 
                         write_stage = 0;
-                        before_csw = 0;
+                        set_before_csw(0);
                         total_bytes = 0;
                         received_bytes = 0;
 
@@ -489,10 +490,10 @@ void USBFS_IRQHandler(void)
                         nice_return;
                     }
 
-                    cbw_tag = CBW.dCBWTag;
+                    set_cbw_tag(CBW.dCBWTag);
                     csw instaCSW;
                     instaCSW.dCSWSignature = CSWSignature;
-                    instaCSW.dCSWTag = cbw_tag;
+                    instaCSW.dCSWTag = get_cbw_tag();
 
                     if (!meaningfulCBW(&CBW))
                     {
@@ -518,19 +519,11 @@ void USBFS_IRQHandler(void)
                         nice_return;
                     }
 
-                    before_csw = 1;
-
-                    // printf("CBWCB:\r\n");
-
-                    for (int i = 0; i < CBW.bCBWCBLength; i++)
-                    {
-                        // printf("%02X ", CBW.CBWCB[i]);
-                    }
-                    // printf("\r\n");
+                    set_before_csw(1);
 
                     uint8_t opcode = CBW.CBWCB[0];
                     current_csw.dCSWSignature = CSWSignature;
-                    current_csw.dCSWTag = cbw_tag;
+                    current_csw.dCSWTag = get_cbw_tag();
                     uint16_t data_to_transfer;
                     uint64_t LBA;
                     // TODO: CONTROL checking
@@ -1019,11 +1012,11 @@ void USBFS_IRQHandler(void)
             {
                 // printf("IN\r\n");
 
-                if (before_csw)
+                if (get_before_csw())
                 {
                     if (total_bytes == sent_bytes)
                     {
-                        before_csw = 0;
+                        set_before_csw(0);
                         total_bytes = 0;
                         sent_bytes = 0;
 

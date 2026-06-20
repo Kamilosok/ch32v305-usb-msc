@@ -1,3 +1,4 @@
+<!-- markdownlint-disable MD041 -->
 ![Top language](https://img.shields.io/github/languages/top/Kamilosok/ch32v305-usb-msc)
 
 # USB Mass Storage on CH32V305/7

@@ -63,6 +63,10 @@ LDFLAGS += #-nostdlib
 # Targets
 all: $(BUILD_DIR)/$(TARGET).bin
 
+# Debug
+debug: CFLAGS += -DDO_DEBUG # -g3 -O0 # No space in flash right now ):
+debug: clean all
+
 # Link
 $(BUILD_DIR)/$(TARGET).elf: $(OBJS)
 	$(CC) $(OBJS) $(LDFLAGS) -o $@ $(LIBS)

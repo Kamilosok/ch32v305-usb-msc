@@ -29,8 +29,15 @@ typedef struct __attribute__((packed))
     uint8_t bCSWStatus;
 } csw;
 
-// TODO: Add getters/setters or a better way
-extern uint8_t before_csw;
+// TODO: Full bot logic here
+
+void set_cbw_tag(uint8_t tag);
+
+uint8_t get_cbw_tag();
+
+void set_before_csw(uint8_t val);
+
+uint8_t get_before_csw();
 
 uint8_t validCBW(cbw *CBW);
 

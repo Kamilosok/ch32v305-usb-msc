@@ -8,8 +8,30 @@
 #include <scsi.h>
 #include <ch32v30x.h>
 
-uint8_t before_csw = 0;
-const uint8_t max_lun = 0;
+static uint8_t before_csw = 0;
+static uint32_t cbw_tag = 0;
+
+static const uint8_t max_lun = 0;
+
+void set_cbw_tag(uint8_t tag)
+{
+    cbw_tag = tag;
+}
+
+uint8_t get_cbw_tag()
+{
+    return cbw_tag;
+}
+
+void set_before_csw(uint8_t val)
+{
+    before_csw = val;
+}
+
+uint8_t get_before_csw()
+{
+    return before_csw;
+}
 
 // out_field specifies which byte was erroneous
 uint8_t validCBW(cbw *CBW)
