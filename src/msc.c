@@ -6,19 +6,50 @@
 #include <msc.h>
 
 #include <scsi.h>
-#include <ch32v30x.h>
+static csw current_csw;
 
 static uint8_t before_csw = 0;
 static uint32_t cbw_tag = 0;
 
 static const uint8_t max_lun = 0;
 
-void set_cbw_tag(uint8_t tag)
+// TODO: Move disk operations elsewhere
+static __attribute__((aligned(4))) uint8_t page_cache[FLASH_PAGE_SIZE];
+
+void msc_init(void)
 {
-    cbw_tag = tag;
+    current_csw.dCSWSignature = CSWSignature;
+
+    memset(page_cache, 0, FLASH_PAGE_SIZE);
 }
 
-uint8_t get_cbw_tag()
+uint8_t *get_page_cache(void)
+{
+    return page_cache;
+}
+
+void set_csw(uint32_t residue, uint8_t status)
+{
+    current_csw.dCSWDataResidue = residue;
+    if (status <= CSW_STATUS_PHASE_ERROR)
+        current_csw.bCSWStatus = status;
+
+    // else some error
+}
+
+// Change to only affect CSW
+void set_csw_tag(uint32_t tag)
+{
+    cbw_tag = tag;
+    current_csw.dCSWTag = tag;
+}
+
+const csw *get_csw(void)
+{
+    return (const csw *)&current_csw;
+}
+
+uint8_t get_cbw_tag(void)
 {
     return cbw_tag;
 }
@@ -28,7 +59,7 @@ void set_before_csw(uint8_t val)
     before_csw = val;
 }
 
-uint8_t get_before_csw()
+uint8_t get_before_csw(void)
 {
     return before_csw;
 }
@@ -49,7 +80,7 @@ uint8_t meaningfulCBW(cbw *CBW)
     return 1;
 }
 
-const uint8_t *get_max_LUN()
+const uint8_t *get_max_LUN(void)
 {
     return (const uint8_t *)&max_lun;
 }

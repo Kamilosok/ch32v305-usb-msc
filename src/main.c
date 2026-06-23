@@ -8,6 +8,7 @@
 #include <debug.h>
 
 #include <usb_descriptors.h>
+#include <usb_hw.h>
 #include <msc.h>
 #include <scsi.h>
 
@@ -19,30 +20,6 @@
     } while (0)
 #endif
 
-#define MAX(a, b) ((a) > (b) ? (a) : (b))
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
-
-#define FLASH_PAGE_SIZE (256ul)
-#define STORAGE_PAGE_FIRST (256ul)
-#define STORAGE_PAGE_LAST (496ul)
-
-#define NUM_LBA (0x0080ul)
-#define PAGE_LENGTH (0x0100ul)
-#define LBA_LENGTH (0x0200ul)
-
-#define STORAGE_BASE (0x08000000ul + STORAGE_PAGE_FIRST * FLASH_PAGE_SIZE)
-#define STORAGE_SIZE (NUM_LBA * PAGE_LENGTH)
-
-#define ERASED_WORD (0xe339e339)
-
-static __attribute__((aligned(4))) uint8_t page_cache[PAGE_LENGTH];
-
-static __attribute__((aligned(4))) uint8_t ep0_buf[64];
-static __attribute__((aligned(4))) uint8_t ep1_buf[128];
-
-#define EP1_RX_BUF (ep1_buf)
-#define EP1_TX_BUF (ep1_buf + 64)
-
 #define nice_return                       \
     do                                    \
     {                                     \
@@ -52,9 +29,19 @@ static __attribute__((aligned(4))) uint8_t ep1_buf[128];
         return;                           \
     } while (0)
 
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+
+// This function erases both the FLASH memory backend AND program instructions, softlocking the unit
+static inline void erase_FLASH()
+{
+    FLASH_Unlock();
+
+    FLASH_EraseAllPages();
+}
+
 void TIM1_INT_Init(u16 arr, u16 psc)
 {
-
     NVIC_InitTypeDef NVIC_InitStructure = {0};
     TIM_TimeBaseInitTypeDef TIM_TimeBaseInitStructure = {0};
 
@@ -119,43 +106,6 @@ void USBFS_RCC_Init(void)
     }
 #endif
     RCC_AHBPeriphClockCmd(RCC_AHBPeriph_USBFS, ENABLE);
-}
-
-void USBFS_MSC_INIT(void)
-{
-    USBFSD->BASE_CTRL = USBFS_UC_RESET_SIE | USBFS_UC_CLR_ALL;
-    Delay_Us(10);
-    USBFSD->BASE_CTRL = 0x00;
-    Delay_Us(10);
-
-    USBFSD->UEP4_1_MOD = USBFS_UEP1_RX_EN | USBFS_UEP1_TX_EN; // Enable RX TX EP1
-    USBFSD->UEP4_1_MOD &= ~USBFS_UEP1_BUF_MOD;
-    USBFSD->UEP2_3_MOD = 0;
-    USBFSD->UEP5_6_MOD = 0;
-    USBFSD->UEP7_MOD = 0;
-
-    USBFSD->UEP0_DMA = (uint32_t)ep0_buf;
-    USBFSD->UEP0_TX_LEN = 0;
-    USBFSD->UEP0_RX_CTRL = USBFS_UEP_R_RES_ACK;
-    USBFSD->UEP0_TX_CTRL = USBFS_UEP_T_RES_NAK;
-
-    USBFSD->UEP1_DMA = (uint32_t)ep1_buf;
-    USBFSD->UEP1_TX_LEN = 0;
-    USBFSD->UEP1_RX_CTRL = USBFS_UEP_R_RES_ACK | USBFS_UEP_R_AUTO_TOG;
-    USBFSD->UEP1_TX_CTRL = USBFS_UEP_T_RES_NAK | USBFS_UEP_T_AUTO_TOG;
-
-    USBFSD->DEV_ADDR = 0x00;
-
-    /* Enable interrupts */
-    USBFSD->INT_EN = USBFS_UIE_SUSPEND | USBFS_UIE_BUS_RST | USBFS_UIE_TRANSFER;
-
-    /* Enable device with pull-up, DMA */
-    USBFSD->BASE_CTRL = USBFS_UC_DEV_PU_EN | USBFS_UC_INT_BUSY | USBFS_UC_DMA_EN;
-
-    /* Enable port */
-    USBFSD->UDEV_CTRL = USBFS_UD_PD_DIS | USBFS_UD_PORT_EN;
-
-    NVIC_EnableIRQ(USBFS_IRQn);
 }
 
 static const device_descriptor dd = {
@@ -275,8 +225,6 @@ uint8_t prevent_medium_removal;
 
 uint32_t first_invalid_lba = 0;
 
-csw current_csw;
-
 static volatile uint8_t usb_update_flag = 0;
 
 [[gnu::interrupt]]
@@ -296,6 +244,9 @@ void USBFS_IRQHandler(void)
         if (endp == 0 || !configured)
         {
             // printf("EP0\r\n");
+            // TODO: Change EP0 handling for more abstraction
+            uint8_t *ep0_buf = usb_get_rx_buf(0);
+
             bmRequestType = ep0_buf[0];
             bRequest = ep0_buf[1];
             wValue = (ep0_buf[3] << 8) + ep0_buf[2];
@@ -408,47 +359,47 @@ void USBFS_IRQHandler(void)
             {
                 if (write_stage)
                 {
-                    // Potentially slow
                     uint16_t chunk1 = (total_bytes - received_bytes > 64) ? 64 : (total_bytes - received_bytes);
                     uint16_t chunk2 = 0;
-                    uint32_t curr_PAGE = 2 * start_LBA + received_bytes / PAGE_LENGTH;
-                    uint16_t off_in_page = received_bytes % PAGE_LENGTH;
-                    uint32_t page_addr = STORAGE_BASE + (STORAGE_PAGE_FIRST + curr_PAGE) * PAGE_LENGTH;
+                    uint32_t curr_PAGE = 2 * start_LBA + received_bytes / FLASH_PAGE_SIZE;
+                    uint16_t off_in_page = received_bytes % FLASH_PAGE_SIZE;
+                    uint32_t page_addr = STORAGE_BASE + (STORAGE_PAGE_FIRST + curr_PAGE) * FLASH_PAGE_SIZE;
 
-                    if (off_in_page + chunk1 >= PAGE_LENGTH)
+                    if (off_in_page + chunk1 >= FLASH_PAGE_SIZE)
                     {
-                        chunk2 = off_in_page + chunk1 - PAGE_LENGTH;
+                        chunk2 = off_in_page + chunk1 - FLASH_PAGE_SIZE;
                         chunk1 -= chunk2;
 
-                        memcpy(page_cache + off_in_page, EP1_RX_BUF, chunk1);
+                        memcpy(get_page_cache() + off_in_page, usb_get_rx_buf(1), chunk1);
 
                         __disable_irq();
                         FLASH_Unlock_Fast();
                         FLASH_ErasePage_Fast(page_addr);
-                        FLASH_ProgramPage_Fast(page_addr, (uint32_t *)page_cache);
+                        FLASH_ProgramPage_Fast(page_addr, (uint32_t *)get_page_cache());
                         FLASH_Lock_Fast();
                         __enable_irq();
 
-                        memcpy(page_cache, EP1_RX_BUF + chunk1, chunk2);
+                        memcpy(get_page_cache(), usb_get_rx_buf(1) + chunk1, chunk2);
                     }
                     else
                     {
-                        memcpy(page_cache + off_in_page, EP1_RX_BUF, chunk1);
+                        memcpy(get_page_cache() + off_in_page, usb_get_rx_buf(1), chunk1);
                     }
 
                     received_bytes += chunk1 + chunk2;
-                    current_csw.dCSWDataResidue = total_bytes - received_bytes;
+
+                    set_csw(total_bytes - received_bytes, CSW_STATUS_OK);
 
                     if (total_bytes == received_bytes)
                     {
-                        if ((received_bytes % PAGE_LENGTH) != 0)
+                        if ((received_bytes % FLASH_PAGE_SIZE) != 0)
                         {
                             // Get the page data
-                            __attribute__((aligned(4))) uint8_t prev_page[PAGE_LENGTH];
-                            memcpy(prev_page, (uint8_t *)page_addr, PAGE_LENGTH);
+                            __attribute__((aligned(4))) uint8_t prev_page[FLASH_PAGE_SIZE];
+                            memcpy(prev_page, (uint8_t *)page_addr, FLASH_PAGE_SIZE);
 
                             // Update it by the chunk
-                            memcpy(prev_page, page_cache, off_in_page + chunk1);
+                            memcpy(prev_page, get_page_cache(), off_in_page + chunk1);
                             __disable_irq();
                             FLASH_Unlock_Fast();
                             FLASH_ErasePage_Fast(page_addr);
@@ -462,46 +413,39 @@ void USBFS_IRQHandler(void)
                         total_bytes = 0;
                         received_bytes = 0;
 
-                        memcpy(EP1_TX_BUF, &current_csw, sizeof(csw));
-                        USBFSD->UEP1_TX_LEN = sizeof(csw);
-                        printf("OFF\r\n");
-                        USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+                        usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
                     }
                     else
-                        USBFSD->UEP1_RX_CTRL = ((USBFSD->UEP1_RX_CTRL) & ~0b11) | USBFS_UEP_R_RES_ACK;
+                        usb_set_rx_ep_res(1, USBFS_UEP_R_RES_ACK);
 
                     nice_return;
                 }
-                else
+                else // Proper BOT
                 {
-                    // printf("OUT\r\n");
                     cbw CBW;
-                    memcpy(&CBW, EP1_RX_BUF, sizeof(cbw));
+                    memcpy(&CBW, usb_get_rx_buf(1), sizeof(cbw));
                     len = USBFSD->RX_LEN;
 
                     if (!validCBW(&CBW))
                     {
                         printf("Invalid CBW\r\n");
-                        USBFSD->UEP1_TX_LEN = 0;
+                        USBFSD->UEP1_TX_LEN = 0; // TODO: Remove?
                         //  The device shall STALL the Bulk-In pipe. Also, the device shall either STALL the Bulk-Out pipe or ... So we stall both
-                        USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_STALL;
-                        USBFSD->UEP1_RX_CTRL = ((USBFSD->UEP1_RX_CTRL) & ~0b11) | USBFS_UEP_R_RES_STALL;
+                        usb_set_tx_ep_res(1, USBFS_UEP_T_RES_STALL);
+                        usb_set_rx_ep_res(1, USBFS_UEP_R_RES_STALL);
 
                         nice_return;
                     }
 
-                    set_cbw_tag(CBW.dCBWTag);
-                    csw instaCSW;
-                    instaCSW.dCSWSignature = CSWSignature;
-                    instaCSW.dCSWTag = get_cbw_tag();
+                    set_csw_tag(CBW.dCBWTag);
 
                     if (!meaningfulCBW(&CBW))
                     {
                         printf("Unmeaningful CBW\r\n");
 
                         // The response of a device to a CBW that is not meaningful is not specified
-                        USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_STALL;
-                        USBFSD->UEP1_RX_CTRL = ((USBFSD->UEP1_RX_CTRL) & ~0b11) | USBFS_UEP_R_RES_STALL;
+                        usb_set_tx_ep_res(1, USBFS_UEP_T_RES_STALL);
+                        usb_set_rx_ep_res(1, USBFS_UEP_R_RES_STALL);
                     }
 
                     if (!command_supported(CBW.CBWCB[0]))
@@ -509,12 +453,9 @@ void USBFS_IRQHandler(void)
                         set_sense(0x05, 0x20, 0x00, 0);
                         set_field_pointer(0);
 
-                        instaCSW.dCSWDataResidue = CBW.dCBWDataTransferLength;
-                        instaCSW.bCSWStatus = 0x01;
+                        set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
 
-                        memcpy(EP1_TX_BUF, &instaCSW, sizeof(csw));
-                        USBFSD->UEP1_TX_LEN = sizeof(csw);
-                        USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+                        usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
                         nice_return;
                     }
@@ -522,8 +463,6 @@ void USBFS_IRQHandler(void)
                     set_before_csw(1);
 
                     uint8_t opcode = CBW.CBWCB[0];
-                    current_csw.dCSWSignature = CSWSignature;
-                    current_csw.dCSWTag = get_cbw_tag();
                     uint16_t data_to_transfer;
                     uint64_t LBA;
                     // TODO: CONTROL checking
@@ -540,12 +479,10 @@ void USBFS_IRQHandler(void)
                         {
                             set_sense(0x05, 0x20, 0x00, 0);
                             set_error_pointers(0, 1);
-                            instaCSW.dCSWDataResidue = CBW.dCBWDataTransferLength;
-                            instaCSW.bCSWStatus = 0x01;
 
-                            memcpy(EP1_TX_BUF, &instaCSW, sizeof(csw));
-                            USBFSD->UEP1_TX_LEN = sizeof(csw);
-                            USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+                            set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
+
+                            usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
                             nice_return;
                         }
@@ -554,12 +491,10 @@ void USBFS_IRQHandler(void)
                         {
                             set_sense(0x05, 0x24, 0x00, 0);
                             set_field_pointer(2);
-                            instaCSW.dCSWDataResidue = CBW.dCBWDataTransferLength;
-                            instaCSW.bCSWStatus = 0x01;
 
-                            memcpy(EP1_TX_BUF, &instaCSW, sizeof(csw));
-                            USBFSD->UEP1_TX_LEN = sizeof(csw);
-                            USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+                            set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
+
+                            usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
                             nice_return;
                         }
@@ -569,24 +504,21 @@ void USBFS_IRQHandler(void)
                         set_sense(0, 0, 0, 0);
 
                         data_to_transfer = MIN(sizeof(inquiry_data), MIN(alloc_len, CBW.dCBWDataTransferLength));
-                        current_csw.dCSWDataResidue = CBW.dCBWDataTransferLength - data_to_transfer;
-                        current_csw.bCSWStatus = 0x00;
 
-                        memcpy(EP1_TX_BUF, &iq, sizeof(inquiry_data));
-                        USBFSD->UEP1_TX_LEN = data_to_transfer;
-                        USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+                        set_csw(CBW.dCBWDataTransferLength - data_to_transfer, CSW_STATUS_OK);
+
+                        usb_tx_data_ep_res(&iq, data_to_transfer, 1, USBFS_UEP_T_RES_ACK);
 
                         // Send CSW ok in next IN
                         nice_return;
 
                     case TEST_UNIT_READY_OP:
                         // printf("Test Unit Ready\r\n");
-                        instaCSW.dCSWDataResidue = CBW.dCBWDataTransferLength; // Should be 0
-                        instaCSW.bCSWStatus = 0x00;                            // When a storage medium is added respond accordingly
 
-                        memcpy(EP1_TX_BUF, &instaCSW, sizeof(csw));
-                        USBFSD->UEP1_TX_LEN = sizeof(csw);
-                        USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+                        // Transfer should be 0, when a storage medium is added respond accordingly
+                        set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_OK);
+
+                        usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
                         nice_return;
 
@@ -602,24 +534,20 @@ void USBFS_IRQHandler(void)
                             set_sense(0x05, 0x24, 0x00, 0);
                             set_field_pointer(2);
 
-                            instaCSW.dCSWDataResidue = CBW.dCBWDataTransferLength;
-                            instaCSW.bCSWStatus = 0x01;
+                            set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
 
-                            memcpy(EP1_TX_BUF, &instaCSW, sizeof(csw));
-                            USBFSD->UEP1_TX_LEN = sizeof(csw);
-                            USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+                            usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
                             nice_return;
                         }
 
                         set_sense(0, 0, 0, 0);
                         data_to_transfer = CBW.dCBWDataTransferLength;
-                        current_csw.dCSWDataResidue = 0; // CBW.dCBWDataTransferLength - data_to_transfer
-                        current_csw.bCSWStatus = 0x00;
 
-                        memcpy(EP1_TX_BUF, &rcd, data_to_transfer);
-                        USBFSD->UEP1_TX_LEN = data_to_transfer;
-                        USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+                        // Always 0
+                        set_csw(CBW.dCBWDataTransferLength - data_to_transfer, CSW_STATUS_OK);
+
+                        usb_tx_data_ep_res(&rcd, data_to_transfer, 1, USBFS_UEP_T_RES_ACK);
 
                         // Send CSW ok in next IN
                         nice_return;
@@ -636,12 +564,10 @@ void USBFS_IRQHandler(void)
                         {
                             set_sense(0x05, 0x24, 0x00, 0);
                             set_error_pointers(7, 1);
-                            instaCSW.dCSWDataResidue = CBW.dCBWDataTransferLength;
-                            instaCSW.bCSWStatus = 0x01;
 
-                            memcpy(EP1_TX_BUF, &instaCSW, sizeof(csw));
-                            USBFSD->UEP1_TX_LEN = sizeof(csw);
-                            USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+                            set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
+
+                            usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
                             nice_return;
                         }
@@ -659,12 +585,9 @@ void USBFS_IRQHandler(void)
                             else
                                 first_invalid_lba = NUM_LBA;
 
-                            instaCSW.dCSWDataResidue = CBW.dCBWDataTransferLength;
-                            instaCSW.bCSWStatus = 0x01;
+                            set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
 
-                            memcpy(EP1_TX_BUF, &instaCSW, sizeof(csw));
-                            USBFSD->UEP1_TX_LEN = sizeof(csw);
-                            USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+                            usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
                             nice_return;
                         }
@@ -673,12 +596,9 @@ void USBFS_IRQHandler(void)
 
                         if (transfer_length == 0)
                         {
-                            instaCSW.dCSWDataResidue = 0;
-                            instaCSW.bCSWStatus = 0x00;
+                            set_csw(0, CSW_STATUS_OK);
 
-                            memcpy(EP1_TX_BUF, &instaCSW, sizeof(csw));
-                            USBFSD->UEP1_TX_LEN = sizeof(csw);
-                            USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+                            usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
                             nice_return;
                         }
@@ -690,21 +610,20 @@ void USBFS_IRQHandler(void)
 
                             set_sense(0, 0, 0, 0);
                             data_to_transfer = CBW.dCBWDataTransferLength;
-                            current_csw.dCSWDataResidue = (uint32_t)(total_bytes - sent_bytes);
-                            current_csw.bCSWStatus = 0x00;
+
+                            set_csw((uint32_t)(total_bytes - sent_bytes), CSW_STATUS_OK);
 
                             // Data stage
                             uint16_t chunk = (total_bytes > 64) ? 64 : total_bytes;
 
-                            uint8_t *read_addr = (uint8_t *)(uintptr_t)(STORAGE_BASE + (STORAGE_PAGE_FIRST + start_LBA * 2) * PAGE_LENGTH);
+                            uint8_t *read_addr = (uint8_t *)(uintptr_t)(STORAGE_BASE + (STORAGE_PAGE_FIRST + start_LBA * 2) * FLASH_PAGE_SIZE);
 
-                            memcpy(page_cache, read_addr, PAGE_LENGTH);
+                            memcpy(get_page_cache(), read_addr, FLASH_PAGE_SIZE);
 
-                            memcpy(EP1_TX_BUF, page_cache, chunk);
-                            USBFSD->UEP1_TX_LEN = chunk;
+                            usb_tx_data_ep_res(get_page_cache(), chunk, 1, USBFS_UEP_T_RES_ACK);
+
                             sent_bytes += chunk;
 
-                            USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
                             nice_return;
                         }
 
@@ -739,26 +658,20 @@ void USBFS_IRQHandler(void)
                         {
                             set_sense(0x05, 0x24, 0x00, 0);
 
-                            instaCSW.dCSWDataResidue = CBW.dCBWDataTransferLength;
-                            instaCSW.bCSWStatus = 0x01;
+                            set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
 
-                            memcpy(EP1_TX_BUF, &instaCSW, sizeof(csw));
-                            USBFSD->UEP1_TX_LEN = sizeof(csw);
-                            USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+                            usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
                             nice_return;
                         }
 
                         set_sense(0, 0, 0, 0);
                         data_to_transfer = MIN(sizeof(mode_parameter_header_6), MIN(allocation_len, CBW.dCBWDataTransferLength));
-                        // Short transfer!
-                        current_csw.dCSWDataResidue = CBW.dCBWDataTransferLength - data_to_transfer;
-                        current_csw.bCSWStatus = 0x00;
 
-                        memcpy(EP1_TX_BUF, &mph6, data_to_transfer);
-                        USBFSD->UEP1_TX_LEN = data_to_transfer;
+                        // Intentional short transfer
+                        set_csw(CBW.dCBWDataTransferLength - data_to_transfer, CSW_STATUS_OK);
 
-                        USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+                        usb_tx_data_ep_res(&mph6, data_to_transfer, 1, USBFS_UEP_T_RES_ACK);
 
                         // Send CSW ok in next IN
                         nice_return;
@@ -770,12 +683,9 @@ void USBFS_IRQHandler(void)
                         prevent_medium_removal = CBW.CBWCB[4] & 0b11;
 
                         set_sense(0, 0, 0, 0);
-                        instaCSW.dCSWDataResidue = 0;
-                        instaCSW.bCSWStatus = 0x00;
+                        set_csw(0, CSW_STATUS_OK);
 
-                        memcpy(EP1_TX_BUF, &instaCSW, sizeof(csw));
-                        USBFSD->UEP1_TX_LEN = sizeof(csw);
-                        USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+                        usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
                         nice_return;
 
@@ -791,12 +701,10 @@ void USBFS_IRQHandler(void)
                         {
                             set_sense(0x05, 0x24, 0x00, 0);
                             set_error_pointers(7, 1);
-                            instaCSW.dCSWDataResidue = CBW.dCBWDataTransferLength;
-                            instaCSW.bCSWStatus = 0x01;
 
-                            memcpy(EP1_TX_BUF, &instaCSW, sizeof(csw));
-                            USBFSD->UEP1_TX_LEN = sizeof(csw);
-                            USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+                            set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
+
+                            usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
                             nice_return;
                         }
@@ -814,12 +722,9 @@ void USBFS_IRQHandler(void)
                             else
                                 first_invalid_lba = NUM_LBA;
 
-                            instaCSW.dCSWDataResidue = CBW.dCBWDataTransferLength;
-                            instaCSW.bCSWStatus = 0x01;
+                            set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
 
-                            memcpy(EP1_TX_BUF, &instaCSW, sizeof(csw));
-                            USBFSD->UEP1_TX_LEN = sizeof(csw);
-                            USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+                            usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
                             nice_return;
                         }
@@ -828,12 +733,9 @@ void USBFS_IRQHandler(void)
 
                         if (transfer_length_w == 0)
                         {
-                            instaCSW.dCSWDataResidue = 0;
-                            instaCSW.bCSWStatus = 0x00;
+                            set_csw(0, CSW_STATUS_OK);
 
-                            memcpy(EP1_TX_BUF, &instaCSW, sizeof(csw));
-                            USBFSD->UEP1_TX_LEN = sizeof(csw);
-                            USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+                            usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
                             nice_return;
                         }
@@ -845,11 +747,11 @@ void USBFS_IRQHandler(void)
                             received_bytes = 0;
 
                             set_sense(0, 0, 0, 0);
-                            // Changed later only on short transfers
-                            current_csw.dCSWDataResidue = (uint32_t)(total_bytes - received_bytes);
-                            current_csw.bCSWStatus = 0x00;
 
-                            USBFSD->UEP1_RX_CTRL = ((USBFSD->UEP1_RX_CTRL) & ~0b11) | USBFS_UEP_R_RES_ACK;
+                            // Intentional short transfer
+                            set_csw((uint32_t)(total_bytes - received_bytes), CSW_STATUS_OK);
+
+                            usb_set_rx_ep_res(1, USBFS_UEP_R_RES_ACK);
 
                             nice_return;
                         }
@@ -861,12 +763,9 @@ void USBFS_IRQHandler(void)
                         if (immed)
                         {
                             set_sense(0, 0, 0, 0);
-                            instaCSW.dCSWDataResidue = 0;
-                            instaCSW.bCSWStatus = 0x00;
+                            set_csw(0, CSW_STATUS_OK);
 
-                            memcpy(EP1_TX_BUF, &instaCSW, sizeof(csw));
-                            USBFSD->UEP1_TX_LEN = sizeof(csw);
-                            USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+                            usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
                             nice_return;
                         }
@@ -883,12 +782,9 @@ void USBFS_IRQHandler(void)
                              */
                             set_sense(0x05, 0x24, 0x00, 0);
                             set_error_pointers(7, 4);
-                            instaCSW.dCSWDataResidue = CBW.dCBWDataTransferLength;
-                            instaCSW.bCSWStatus = 0x01;
+                            set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
 
-                            memcpy(EP1_TX_BUF, &instaCSW, sizeof(csw));
-                            USBFSD->UEP1_TX_LEN = sizeof(csw);
-                            USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+                            usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
                             nice_return;
                         }
@@ -902,12 +798,10 @@ void USBFS_IRQHandler(void)
                         else
                             ; // Stopped power condition + timers
                         set_sense(0, 0, 0, 0);
-                        instaCSW.dCSWDataResidue = 0;
-                        instaCSW.bCSWStatus = 0x00;
 
-                        memcpy(EP1_TX_BUF, &instaCSW, sizeof(csw));
-                        USBFSD->UEP1_TX_LEN = sizeof(csw);
-                        USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+                        set_csw(0, CSW_STATUS_OK);
+
+                        usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
                         nice_return;
 
@@ -991,13 +885,10 @@ void USBFS_IRQHandler(void)
                             fsd.sense_key_spec[2] = 0;
                         }
 
-                        current_csw.dCSWDataResidue = 0;
-                        current_csw.bCSWStatus = 0x00;
+                        // current_csw.dCSWDataResidue = 0;
+                        // current_csw.bCSWStatus = 0x00;
 
-                        memcpy(EP1_TX_BUF, &fsd, sizeof(fixed_sense_data));
-                        USBFSD->UEP1_TX_LEN = sizeof(fixed_sense_data);
-
-                        USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+                        usb_tx_data_ep_res(&fsd, sizeof(fixed_sense_data), 1, USBFS_UEP_T_RES_ACK);
 
                         nice_return;
 
@@ -1020,48 +911,46 @@ void USBFS_IRQHandler(void)
                         total_bytes = 0;
                         sent_bytes = 0;
 
-                        memcpy(EP1_TX_BUF, &current_csw, sizeof(csw));
-                        USBFSD->UEP1_TX_LEN = sizeof(csw);
-
-                        USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+                        usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
                         nice_return;
                     }
                     else
                     {
-                        //  Potentially slow
+
                         uint16_t chunk1 = (total_bytes - sent_bytes > 64) ? 64 : (total_bytes - sent_bytes);
                         uint16_t chunk2 = 0;
-                        uint64_t curr_PAGE = start_LBA * 2 + sent_bytes / PAGE_LENGTH;
-                        uint16_t off_in_page = sent_bytes % PAGE_LENGTH;
+                        uint64_t curr_PAGE = start_LBA * 2 + sent_bytes / FLASH_PAGE_SIZE;
+                        uint16_t off_in_page = sent_bytes % FLASH_PAGE_SIZE;
 
-                        if (off_in_page + chunk1 >= PAGE_LENGTH)
+                        if (off_in_page + chunk1 >= FLASH_PAGE_SIZE)
                         {
-                            chunk2 = off_in_page + chunk1 - PAGE_LENGTH;
+                            chunk2 = off_in_page + chunk1 - FLASH_PAGE_SIZE;
                             chunk1 -= chunk2;
 
-                            memcpy(EP1_TX_BUF, page_cache + off_in_page, chunk1);
+                            memcpy(usb_get_tx_buf(1), get_page_cache() + off_in_page, chunk1);
 
-                            memcpy(page_cache, (uint8_t *)(uintptr_t)(STORAGE_BASE + (STORAGE_PAGE_FIRST + curr_PAGE + 1) * PAGE_LENGTH), PAGE_LENGTH);
+                            memcpy(get_page_cache(), (uint8_t *)(uintptr_t)(STORAGE_BASE + (STORAGE_PAGE_FIRST + curr_PAGE + 1) * FLASH_PAGE_SIZE), FLASH_PAGE_SIZE);
 
-                            memcpy(EP1_TX_BUF + chunk1, page_cache, chunk2);
+                            memcpy(usb_get_tx_buf(1) + chunk1, get_page_cache(), chunk2);
                         }
                         else
                         {
-                            memcpy(EP1_TX_BUF, page_cache + off_in_page, chunk1);
+                            memcpy(usb_get_tx_buf(1), get_page_cache() + off_in_page, chunk1);
                         }
 
-                        USBFSD->UEP1_TX_LEN = chunk1 + chunk2;
                         sent_bytes += chunk1 + chunk2;
-                        current_csw.dCSWDataResidue = total_bytes - sent_bytes;
 
-                        USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_ACK;
+                        set_csw((uint32_t)(total_bytes - sent_bytes), CSW_STATUS_OK);
+
+                        // Data manipulation done earlier
+                        usb_tx_data_ep_res(NULL, chunk1 + chunk2, 1, USBFS_UEP_T_RES_ACK);
 
                         nice_return;
                     }
                 }
 
-                USBFSD->UEP1_TX_CTRL = ((USBFSD->UEP1_TX_CTRL) & ~0b11) | USBFS_UEP_T_RES_NAK;
+                usb_set_tx_ep_res(1, USBFS_UEP_T_RES_NAK);
             }
         }
     }
@@ -1071,11 +960,11 @@ void USBFS_IRQHandler(void)
 
 int main(void)
 {
-
     NVIC_PriorityGroupConfig(NVIC_PriorityGroup_2);
     SystemCoreClockUpdate();
     Delay_Init();
     USART_Printf_Init(115200);
+    msc_init();
     setvbuf(stdout, NULL, _IONBF, 0);
 
     printf("SystemClk:%lu\r\n", SystemCoreClock);
@@ -1085,19 +974,7 @@ int main(void)
     TIM1_INT_Init(3000 - 1, 48000 - 1);
     printf("TIM1 initialized\r\n");
 
-    /* USBFS Device init, till setup */
-
     USBFS_RCC_Init();
-    printf("USBFS clock config done\r\n");
-
-    memset(page_cache, 0, PAGE_LENGTH);
-
-    // Nuclear option
-    /*
-    FLASH_Unlock();
-
-    FLASH_EraseAllPages();
-    */
 
     USBFS_MSC_INIT();
 

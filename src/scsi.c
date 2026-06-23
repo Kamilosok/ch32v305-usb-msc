@@ -37,7 +37,6 @@ void set_sense(uint8_t key, uint8_t asc, uint8_t ascq, uint8_t deferred)
 
 void set_error_pointers(uint8_t bit_pointer, uint16_t byte_pointer)
 {
-
     current_sense.bit_pointer = bit_pointer & 0b111;
     current_sense.bpv = 1;
     current_sense.field_pointer = __builtin_bswap16(byte_pointer);
