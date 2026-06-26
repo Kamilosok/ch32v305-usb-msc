@@ -6,6 +6,7 @@
 #pragma once
 
 #include <inttypes.h>
+#include <msc.h>
 
 #define INQUIRY_OP (0x12)
 #define TEST_UNIT_READY_OP (0x00)
@@ -74,8 +75,17 @@ typedef struct __attribute__((packed))
 uint8_t command_supported(uint8_t command_op);
 
 void set_sense(uint8_t key, uint8_t asc, uint8_t ascq, uint8_t deferred);
+
 void set_error_pointers(uint8_t bit_pointer, uint16_t byte_pointer);
+
 void set_field_pointer(uint16_t byte_pointer);
+
 const sense *get_sense(void);
+
+const inquiry_data *get_inquiry_data(void);
+
+const read_capacity_data *get_read_capacity_data(void);
+
+const mode_parameter_header_6 *get_mode_parameter_header_6(void);
 
 // TODO: Add more of the SCSI logic here

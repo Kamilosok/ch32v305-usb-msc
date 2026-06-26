@@ -6,8 +6,12 @@
 #pragma once
 
 #include <inttypes.h>
+#include <string.h>
 
-#define USB_GET_MAX_LUN (0xFE)
+#define LAST_EP (1)
+#define EP0_BUF_SIZE (64)
+#define EP1_IN_BUF_SIZE (64)
+#define EP1_OUT_BUF_SIZE (64)
 
 typedef struct __attribute__((packed))
 {
@@ -62,3 +66,11 @@ typedef struct __attribute__((packed))
     uint16_t wMaxPacketSize;
     uint8_t bInterval;
 } endpoint_descriptor;
+
+const device_descriptor *get_device_descriptor(void);
+
+const config_descriptor *get_configuration_descriptor(void);
+
+const interface_descriptor *get_interface_descriptor(void);
+
+const endpoint_descriptor *get_endpoint_descriptor(uint8_t ep, uint8_t in);

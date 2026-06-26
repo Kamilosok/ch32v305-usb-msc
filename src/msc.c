@@ -67,6 +67,7 @@ uint8_t get_before_csw(void)
 // out_field specifies which byte was erroneous
 uint8_t validCBW(cbw *CBW)
 {
+    // NO USBFSD->
     if (CBW->dCBWSignature != CBWSignature || USBFSD->RX_LEN != sizeof(cbw) || before_csw)
         return 0;
     return 1;

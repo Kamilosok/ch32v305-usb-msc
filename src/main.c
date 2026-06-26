@@ -8,11 +8,11 @@
 #include <debug.h>
 
 #include <usb_descriptors.h>
-#include <usb_hw.h>
+#include <usb_hal.h>
 #include <msc.h>
 #include <scsi.h>
 
-// DEBUG is already taken
+// 'DEBUG' was taken
 #ifndef DO_DEBUG
 #define printf(...) \
     do              \
@@ -32,43 +32,6 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
 
-// This function erases both the FLASH memory backend AND program instructions, softlocking the unit
-static inline void erase_FLASH()
-{
-    FLASH_Unlock();
-
-    FLASH_EraseAllPages();
-}
-
-void TIM1_INT_Init(u16 arr, u16 psc)
-{
-    NVIC_InitTypeDef NVIC_InitStructure = {0};
-    TIM_TimeBaseInitTypeDef TIM_TimeBaseInitStructure = {0};
-
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_TIM1, ENABLE);
-
-    TIM_TimeBaseInitStructure.TIM_Period = arr;
-    TIM_TimeBaseInitStructure.TIM_Prescaler = psc;
-    TIM_TimeBaseInitStructure.TIM_ClockDivision = TIM_CKD_DIV1;
-    TIM_TimeBaseInitStructure.TIM_CounterMode = TIM_CounterMode_Up;
-    TIM_TimeBaseInitStructure.TIM_RepetitionCounter = 0;
-    TIM_TimeBaseInit(TIM1, &TIM_TimeBaseInitStructure);
-
-    TIM_ARRPreloadConfig(TIM1, ENABLE);
-
-    TIM_ClearFlag(TIM1, TIM_FLAG_Update);
-    TIM_ClearITPendingBit(TIM1, TIM_IT_Update);
-
-    NVIC_InitStructure.NVIC_IRQChannel = TIM1_UP_IRQn;
-    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 1;
-    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 1;
-    NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
-    NVIC_Init(&NVIC_InitStructure);
-
-    TIM_ITConfig(TIM1, TIM_IT_Update, ENABLE);
-    TIM_Cmd(TIM1, ENABLE);
-}
-
 static volatile uint8_t tim1_update_flag = 0;
 
 [[gnu::interrupt]]
@@ -80,133 +43,6 @@ void TIM1_UP_IRQHandler(void)
         tim1_update_flag = 1;
     }
 }
-
-void USBFS_RCC_Init(void)
-{
-#ifdef CH32V30x_D8C
-    RCC_USBCLK48MConfig(RCC_USBCLK48MCLKSource_USBPHY);
-    RCC_USBHSPLLCLKConfig(RCC_HSBHSPLLCLKSource_HSE);
-    RCC_USBHSConfig(RCC_USBPLL_Div2);
-    RCC_USBHSPLLCKREFCLKConfig(RCC_USBHSPLLCKREFCLK_4M);
-    RCC_USBHSPHYPLLALIVEcmd(ENABLE);
-    // THIS IS ALSO CONFIGURED BY TIM1_INT_Init
-    RCC_AHBPeriphClockCmd(RCC_AHBPeriph_USBHS, ENABLE);
-#else
-    if (SystemCoreClock == 144000000)
-    {
-        RCC_USBFSCLKConfig(RCC_USBFSCLKSource_PLLCLK_Div3);
-    }
-    else if (SystemCoreClock == 96000000)
-    {
-        RCC_USBFSCLKConfig(RCC_USBFSCLKSource_PLLCLK_Div2);
-    }
-    else if (SystemCoreClock == 48000000)
-    {
-        RCC_USBFSCLKConfig(RCC_USBFSCLKSource_PLLCLK_Div1);
-    }
-#endif
-    RCC_AHBPeriphClockCmd(RCC_AHBPeriph_USBFS, ENABLE);
-}
-
-static const device_descriptor dd = {
-    .bLength = 18,
-    .bDescriptorType = 0x01,
-    .bcdUSB = 0x0200,
-
-    .bDeviceClass = 0x00,
-    .bDeviceSubClass = 0,
-    .bDeviceProtocol = 0,
-    .bMaxPacketSize = 64,
-    .idVendor = 0,
-    .idProduct = 0,
-    .bcdDevice = 0x0100,
-
-    // Change iSerial when adding win
-    .iManufacturer = 0,
-    .iProduct = 0,
-    .iSerialNumber = 0,
-    .bNumConfigurations = 1,
-};
-
-static const config_descriptor cd = {
-    .bLength = 9,
-    .bDescriptorType = 0x02,
-    .wTotalLength = sizeof(config_descriptor) + sizeof(interface_descriptor) + 2 * sizeof(endpoint_descriptor), // + (endpoint, and class or vendor specific descriptors
-    .bNumInterfaces = 1,
-    .bConfigurationValue = 1,
-    .iConfiguration = 0, // No string
-    .bmAttributes = 0x80,
-    .bMaxPower = 50, // 100 mA
-};
-
-static const interface_descriptor id = {
-    .bLength = 9,
-    .bDescriptorType = 0x04,
-    .bInterfaceNumber = 0,
-    .bAlternateSetting = 0,
-    .bNumEndpoints = 2, // EP1 IN and OUT
-    .bInterfaceClass = 0x08,
-    .bInterfaceSubClass = 0x06,
-    .bInterfaceProtocol = 0x50,
-    .iInterface = 0,
-};
-
-// Bulk in only for now
-static const endpoint_descriptor ed1_in = {
-    .bLength = 7,
-    .bDescriptorType = 0x05,
-    // In EP1
-    .bEndpointAddress = ((1 & 0x01) << 7) | (1 & 0b1111),
-    .bmAttributes = 0x02, // Bulk
-    .wMaxPacketSize = 64,
-    // Ignored for Bulk & Control Endpoints
-    .bInterval = 0,
-};
-
-static const endpoint_descriptor ed1_out = {
-    .bLength = 7,
-    .bDescriptorType = 0x05,
-    // Out EP1
-    .bEndpointAddress = ((0 & 0x01) << 7) | (1 & 0b1111),
-    .bmAttributes = 0x02, // Bulk
-    .wMaxPacketSize = 64,
-    // Ignored for Bulk & Control Endpoints
-    .bInterval = 0,
-};
-
-static const inquiry_data iq = {
-    .peripheral = 0x00,
-    .rmb = 0x80,
-
-    .version = (1 << 7), // Compliant with SPC-3, but we don't support a lot of it
-
-    .resp_data_format = 0x02,
-    .additional_length = 31,
-
-    .flags1 = 0,
-    .flags2 = 0, // Maybe look into QUE and CMDQUE
-    .flags3 = 0,
-
-    .vendor = "NONE    ",          // 8
-    .product = "RISC-V SOC MSC  ", // 16
-    .revision = "0.01",            // 4
-};
-
-static const mode_parameter_header_6 mph6 = {
-    // Only the header
-    .mode_data_length = sizeof(mode_parameter_header_6) - 1,
-    // Data medium?
-    .medium_type = 0x00,
-    .device_specific_parameter = 0x00,
-    // No blocks
-    .block_descriptor_length = 0,
-};
-
-static const read_capacity_data rcd = {
-    // Big endian nums
-    .ret_lba = __builtin_bswap32(NUM_LBA - 1),
-    .block_length = __builtin_bswap32(LBA_LENGTH),
-};
 
 uint64_t total_bytes = 0;
 uint64_t sent_bytes = 0;
@@ -264,7 +100,7 @@ void USBFS_IRQHandler(void)
                     if (wLength < send_len)
                         send_len = wLength;
 
-                    memcpy(ep0_buf, &dd, send_len);
+                    memcpy(ep0_buf, get_device_descriptor(), send_len);
 
                     USBFSD->UEP0_TX_LEN = send_len;
                     USBFSD->UEP0_TX_CTRL = USBFS_UEP_T_TOG | USBFS_UEP_T_RES_ACK;
@@ -294,13 +130,13 @@ void USBFS_IRQHandler(void)
                     if (wLength < send_len)
                         send_len = wLength;
 
-                    memcpy(ep0_buf, &cd, sizeof(config_descriptor));
+                    memcpy(ep0_buf, get_configuration_descriptor(), sizeof(config_descriptor));
                     // We need to send the config descriptor by itself first, then everything
                     if (send_len > sizeof(config_descriptor))
                     {
-                        memcpy(ep0_buf + sizeof(config_descriptor), &id, sizeof(interface_descriptor));
-                        memcpy(ep0_buf + sizeof(config_descriptor) + sizeof(interface_descriptor), &ed1_out, sizeof(endpoint_descriptor));
-                        memcpy(ep0_buf + sizeof(config_descriptor) + sizeof(interface_descriptor) + sizeof(endpoint_descriptor), &ed1_in, sizeof(endpoint_descriptor));
+                        memcpy(ep0_buf + sizeof(config_descriptor), get_interface_descriptor(), sizeof(interface_descriptor));
+                        memcpy(ep0_buf + sizeof(config_descriptor) + sizeof(interface_descriptor), get_endpoint_descriptor(1, 0), sizeof(endpoint_descriptor));
+                        memcpy(ep0_buf + sizeof(config_descriptor) + sizeof(interface_descriptor) + sizeof(endpoint_descriptor), get_endpoint_descriptor(1, 1), sizeof(endpoint_descriptor));
                     }
 
                     USBFSD->UEP0_TX_LEN = send_len;
@@ -507,7 +343,7 @@ void USBFS_IRQHandler(void)
 
                         set_csw(CBW.dCBWDataTransferLength - data_to_transfer, CSW_STATUS_OK);
 
-                        usb_tx_data_ep_res(&iq, data_to_transfer, 1, USBFS_UEP_T_RES_ACK);
+                        usb_tx_data_ep_res(get_inquiry_data(), data_to_transfer, 1, USBFS_UEP_T_RES_ACK);
 
                         // Send CSW ok in next IN
                         nice_return;
@@ -547,7 +383,7 @@ void USBFS_IRQHandler(void)
                         // Always 0
                         set_csw(CBW.dCBWDataTransferLength - data_to_transfer, CSW_STATUS_OK);
 
-                        usb_tx_data_ep_res(&rcd, data_to_transfer, 1, USBFS_UEP_T_RES_ACK);
+                        usb_tx_data_ep_res(get_read_capacity_data(), data_to_transfer, 1, USBFS_UEP_T_RES_ACK);
 
                         // Send CSW ok in next IN
                         nice_return;
@@ -671,7 +507,7 @@ void USBFS_IRQHandler(void)
                         // Intentional short transfer
                         set_csw(CBW.dCBWDataTransferLength - data_to_transfer, CSW_STATUS_OK);
 
-                        usb_tx_data_ep_res(&mph6, data_to_transfer, 1, USBFS_UEP_T_RES_ACK);
+                        usb_tx_data_ep_res(get_mode_parameter_header_6(), data_to_transfer, 1, USBFS_UEP_T_RES_ACK);
 
                         // Send CSW ok in next IN
                         nice_return;

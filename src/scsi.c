@@ -5,6 +5,40 @@
 
 #include <scsi.h>
 
+static const inquiry_data iq = {
+    .peripheral = 0x00,
+    .rmb = 0x80,
+
+    .version = (1 << 7), // Compliant with SPC-3, but we don't support a lot of it
+
+    .resp_data_format = 0x02,
+    .additional_length = 31,
+
+    .flags1 = 0,
+    .flags2 = 0, // Maybe look into QUE and CMDQUE
+    .flags3 = 0,
+
+    .vendor = "NONE    ",          // 8
+    .product = "RISC-V SOC MSC  ", // 16
+    .revision = "0.01",            // 4
+};
+
+static const read_capacity_data rcd = {
+    // Big endian nums
+    .ret_lba = __builtin_bswap32(NUM_LBA - 1),
+    .block_length = __builtin_bswap32(LBA_LENGTH),
+};
+
+static const mode_parameter_header_6 mph6 = {
+    // Only the header
+    .mode_data_length = sizeof(mode_parameter_header_6) - 1,
+    // Data medium?
+    .medium_type = 0x00,
+    .device_specific_parameter = 0x00,
+    // No blocks
+    .block_descriptor_length = 0,
+};
+
 static sense current_sense;
 
 uint8_t command_supported(uint8_t command_op)
@@ -51,4 +85,19 @@ void set_field_pointer(uint16_t byte_pointer)
 const sense *get_sense(void)
 {
     return &current_sense;
+}
+
+const inquiry_data *get_inquiry_data(void)
+{
+    return &iq;
+}
+
+const read_capacity_data *get_read_capacity_data(void)
+{
+    return &rcd;
+}
+
+const mode_parameter_header_6 *get_mode_parameter_header_6(void)
+{
+    return &mph6;
 }
