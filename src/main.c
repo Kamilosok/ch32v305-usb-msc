@@ -11,23 +11,12 @@
 #include <usb_hal.h>
 #include <msc.h>
 #include <scsi.h>
+#include <flash_storage.h>
 
 // 'DEBUG' was taken
 #ifndef DO_DEBUG
-#define printf(...) \
-    do              \
-    {               \
-    } while (0)
+#define printf(...)
 #endif
-
-#define nice_return                       \
-    do                                    \
-    {                                     \
-        usb_update_flag = 1;              \
-        NVIC_ClearPendingIRQ(USBFS_IRQn); \
-        USBFSD->INT_FG = intflag;         \
-        return;                           \
-    } while (0)
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -66,9 +55,11 @@ static volatile uint8_t usb_update_flag = 0;
 [[gnu::interrupt]]
 void USBFS_IRQHandler(void)
 {
+    usb_update_flag = 1;
+
     uint16_t __attribute__((unused)) len, wValue, __attribute__((unused)) wIndex, wLength;
     uint8_t bmRequestType, bRequest;
-    uint8_t intflag, stflag, __attribute__((unused)) errflag = 0;
+    uint8_t intflag, stflag;
 
     intflag = USBFSD->INT_FG;
     stflag = USBFSD->INT_ST;
@@ -195,55 +186,17 @@ void USBFS_IRQHandler(void)
             {
                 if (write_stage)
                 {
-                    uint16_t chunk1 = (total_bytes - received_bytes > 64) ? 64 : (total_bytes - received_bytes);
-                    uint16_t chunk2 = 0;
-                    uint32_t curr_PAGE = 2 * start_LBA + received_bytes / FLASH_PAGE_SIZE;
-                    uint16_t off_in_page = received_bytes % FLASH_PAGE_SIZE;
-                    uint32_t page_addr = STORAGE_BASE + (STORAGE_PAGE_FIRST + curr_PAGE) * FLASH_PAGE_SIZE;
+                    uint16_t chunk = (total_bytes - received_bytes > EP1_IN_BUF_SIZE) ? EP1_IN_BUF_SIZE : (total_bytes - received_bytes);
+                    uint32_t store_addr = start_LBA * LBA_LENGTH + received_bytes;
 
-                    if (off_in_page + chunk1 >= FLASH_PAGE_SIZE)
-                    {
-                        chunk2 = off_in_page + chunk1 - FLASH_PAGE_SIZE;
-                        chunk1 -= chunk2;
+                    store_data(store_addr, usb_get_rx_buf(1), chunk);
 
-                        memcpy(get_page_cache() + off_in_page, usb_get_rx_buf(1), chunk1);
-
-                        __disable_irq();
-                        FLASH_Unlock_Fast();
-                        FLASH_ErasePage_Fast(page_addr);
-                        FLASH_ProgramPage_Fast(page_addr, (uint32_t *)get_page_cache());
-                        FLASH_Lock_Fast();
-                        __enable_irq();
-
-                        memcpy(get_page_cache(), usb_get_rx_buf(1) + chunk1, chunk2);
-                    }
-                    else
-                    {
-                        memcpy(get_page_cache() + off_in_page, usb_get_rx_buf(1), chunk1);
-                    }
-
-                    received_bytes += chunk1 + chunk2;
+                    received_bytes += chunk;
 
                     set_csw(total_bytes - received_bytes, CSW_STATUS_OK);
 
                     if (total_bytes == received_bytes)
                     {
-                        if ((received_bytes % FLASH_PAGE_SIZE) != 0)
-                        {
-                            // Get the page data
-                            __attribute__((aligned(4))) uint8_t prev_page[FLASH_PAGE_SIZE];
-                            memcpy(prev_page, (uint8_t *)page_addr, FLASH_PAGE_SIZE);
-
-                            // Update it by the chunk
-                            memcpy(prev_page, get_page_cache(), off_in_page + chunk1);
-                            __disable_irq();
-                            FLASH_Unlock_Fast();
-                            FLASH_ErasePage_Fast(page_addr);
-                            FLASH_ProgramPage_Fast(page_addr, (uint32_t *)prev_page);
-                            FLASH_Lock_Fast();
-                            __enable_irq();
-                        }
-
                         write_stage = 0;
                         set_before_csw(0);
                         total_bytes = 0;
@@ -252,9 +205,11 @@ void USBFS_IRQHandler(void)
                         usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
                     }
                     else
+                    {
                         usb_set_rx_ep_res(1, USBFS_UEP_R_RES_ACK);
+                    }
 
-                    nice_return;
+                    IRQ_return(USBFS_IRQn);
                 }
                 else // Proper BOT
                 {
@@ -270,7 +225,7 @@ void USBFS_IRQHandler(void)
                         usb_set_tx_ep_res(1, USBFS_UEP_T_RES_STALL);
                         usb_set_rx_ep_res(1, USBFS_UEP_R_RES_STALL);
 
-                        nice_return;
+                        IRQ_return(USBFS_IRQn);
                     }
 
                     set_csw_tag(CBW.dCBWTag);
@@ -293,7 +248,7 @@ void USBFS_IRQHandler(void)
 
                         usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
-                        nice_return;
+                        IRQ_return(USBFS_IRQn);
                     }
 
                     set_before_csw(1);
@@ -320,7 +275,7 @@ void USBFS_IRQHandler(void)
 
                             usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
-                            nice_return;
+                            IRQ_return(USBFS_IRQn);
                         }
 
                         if (page_code != 0)
@@ -332,7 +287,7 @@ void USBFS_IRQHandler(void)
 
                             usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
-                            nice_return;
+                            IRQ_return(USBFS_IRQn);
                         }
 
                         // If data_to_transfer > uint16_max 4.3.4.6
@@ -346,7 +301,7 @@ void USBFS_IRQHandler(void)
                         usb_tx_data_ep_res(get_inquiry_data(), data_to_transfer, 1, USBFS_UEP_T_RES_ACK);
 
                         // Send CSW ok in next IN
-                        nice_return;
+                        IRQ_return(USBFS_IRQn);
 
                     case TEST_UNIT_READY_OP:
                         // printf("Test Unit Ready\r\n");
@@ -356,7 +311,7 @@ void USBFS_IRQHandler(void)
 
                         usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
-                        nice_return;
+                        IRQ_return(USBFS_IRQn);
 
                     case READ_CAPACITY_10_OP:
                         printf("Read Capacity (10)\r\n");
@@ -374,7 +329,7 @@ void USBFS_IRQHandler(void)
 
                             usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
-                            nice_return;
+                            IRQ_return(USBFS_IRQn);
                         }
 
                         set_sense(0, 0, 0, 0);
@@ -386,7 +341,7 @@ void USBFS_IRQHandler(void)
                         usb_tx_data_ep_res(get_read_capacity_data(), data_to_transfer, 1, USBFS_UEP_T_RES_ACK);
 
                         // Send CSW ok in next IN
-                        nice_return;
+                        IRQ_return(USBFS_IRQn);
 
                     case READ_10_OP:
                         printf("Read (10)\r\n");
@@ -405,7 +360,7 @@ void USBFS_IRQHandler(void)
 
                             usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
-                            nice_return;
+                            IRQ_return(USBFS_IRQn);
                         }
 
                         // Ignore DPO because no caching
@@ -425,7 +380,7 @@ void USBFS_IRQHandler(void)
 
                             usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
-                            nice_return;
+                            IRQ_return(USBFS_IRQn);
                         }
 
                         // Ignore group number
@@ -436,7 +391,7 @@ void USBFS_IRQHandler(void)
 
                             usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
-                            nice_return;
+                            IRQ_return(USBFS_IRQn);
                         }
                         else
                         {
@@ -460,7 +415,7 @@ void USBFS_IRQHandler(void)
 
                             sent_bytes += chunk;
 
-                            nice_return;
+                            IRQ_return(USBFS_IRQn);
                         }
 
                     case MODE_SENSE_6_OP:
@@ -498,7 +453,7 @@ void USBFS_IRQHandler(void)
 
                             usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
-                            nice_return;
+                            IRQ_return(USBFS_IRQn);
                         }
 
                         set_sense(0, 0, 0, 0);
@@ -510,7 +465,7 @@ void USBFS_IRQHandler(void)
                         usb_tx_data_ep_res(get_mode_parameter_header_6(), data_to_transfer, 1, USBFS_UEP_T_RES_ACK);
 
                         // Send CSW ok in next IN
-                        nice_return;
+                        IRQ_return(USBFS_IRQn);
 
                     case PREVENT_ALLOW_MEDIUM_REMOVAL_OP:
                         printf("Prevent allow medium removal\r\n");
@@ -523,7 +478,7 @@ void USBFS_IRQHandler(void)
 
                         usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
-                        nice_return;
+                        IRQ_return(USBFS_IRQn);
 
                     case WRITE_10_OP:
                         printf("Write (10)\r\n");
@@ -542,7 +497,7 @@ void USBFS_IRQHandler(void)
 
                             usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
-                            nice_return;
+                            IRQ_return(USBFS_IRQn);
                         }
 
                         // Ignore DPO because no caching
@@ -562,7 +517,7 @@ void USBFS_IRQHandler(void)
 
                             usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
-                            nice_return;
+                            IRQ_return(USBFS_IRQn);
                         }
 
                         // Ignore group number
@@ -573,7 +528,7 @@ void USBFS_IRQHandler(void)
 
                             usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
-                            nice_return;
+                            IRQ_return(USBFS_IRQn);
                         }
                         else
                         {
@@ -589,7 +544,7 @@ void USBFS_IRQHandler(void)
 
                             usb_set_rx_ep_res(1, USBFS_UEP_R_RES_ACK);
 
-                            nice_return;
+                            IRQ_return(USBFS_IRQn);
                         }
 
                     case START_STOP_UNIT_OP:
@@ -603,7 +558,7 @@ void USBFS_IRQHandler(void)
 
                             usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
-                            nice_return;
+                            IRQ_return(USBFS_IRQn);
                         }
 
                         uint8_t ssu_flags = CBW.CBWCB[4];
@@ -622,7 +577,7 @@ void USBFS_IRQHandler(void)
 
                             usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
-                            nice_return;
+                            IRQ_return(USBFS_IRQn);
                         }
                         // Process the START and LOEJ bits
 
@@ -639,7 +594,7 @@ void USBFS_IRQHandler(void)
 
                         usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
-                        nice_return;
+                        IRQ_return(USBFS_IRQn);
 
                     case REQUEST_SENSE_OP:
                         printf("Request Sense\r\n");
@@ -726,12 +681,12 @@ void USBFS_IRQHandler(void)
 
                         usb_tx_data_ep_res(&fsd, sizeof(fixed_sense_data), 1, USBFS_UEP_T_RES_ACK);
 
-                        nice_return;
+                        IRQ_return(USBFS_IRQn);
 
                     default:
                         printf("Unsupported opcode: %02X\r\n", opcode);
 
-                        nice_return;
+                        IRQ_return(USBFS_IRQn);
                     }
                 }
             }
@@ -749,40 +704,24 @@ void USBFS_IRQHandler(void)
 
                         usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
 
-                        nice_return;
+                        IRQ_return(USBFS_IRQn);
                     }
                     else
                     {
 
-                        uint16_t chunk1 = (total_bytes - sent_bytes > 64) ? 64 : (total_bytes - sent_bytes);
-                        uint16_t chunk2 = 0;
-                        uint64_t curr_PAGE = start_LBA * 2 + sent_bytes / FLASH_PAGE_SIZE;
-                        uint16_t off_in_page = sent_bytes % FLASH_PAGE_SIZE;
+                        uint16_t chunk = (total_bytes - sent_bytes > EP1_OUT_BUF_SIZE) ? EP1_OUT_BUF_SIZE : (total_bytes - sent_bytes);
 
-                        if (off_in_page + chunk1 >= FLASH_PAGE_SIZE)
-                        {
-                            chunk2 = off_in_page + chunk1 - FLASH_PAGE_SIZE;
-                            chunk1 -= chunk2;
+                        uint32_t retrieve_addr = start_LBA * LBA_LENGTH + sent_bytes;
 
-                            memcpy(usb_get_tx_buf(1), get_page_cache() + off_in_page, chunk1);
+                        retrieve_data(usb_get_tx_buf(1), retrieve_addr, chunk);
 
-                            memcpy(get_page_cache(), (uint8_t *)(uintptr_t)(STORAGE_BASE + (STORAGE_PAGE_FIRST + curr_PAGE + 1) * FLASH_PAGE_SIZE), FLASH_PAGE_SIZE);
-
-                            memcpy(usb_get_tx_buf(1) + chunk1, get_page_cache(), chunk2);
-                        }
-                        else
-                        {
-                            memcpy(usb_get_tx_buf(1), get_page_cache() + off_in_page, chunk1);
-                        }
-
-                        sent_bytes += chunk1 + chunk2;
-
+                        sent_bytes += chunk;
                         set_csw((uint32_t)(total_bytes - sent_bytes), CSW_STATUS_OK);
 
                         // Data manipulation done earlier
-                        usb_tx_data_ep_res(NULL, chunk1 + chunk2, 1, USBFS_UEP_T_RES_ACK);
+                        usb_tx_data_ep_res(NULL, chunk, 1, USBFS_UEP_T_RES_ACK);
 
-                        nice_return;
+                        IRQ_return(USBFS_IRQn);
                     }
                 }
 
@@ -791,7 +730,7 @@ void USBFS_IRQHandler(void)
         }
     }
 
-    nice_return;
+    IRQ_return(USBFS_IRQn);
 }
 
 int main(void)
@@ -818,7 +757,6 @@ int main(void)
 
     while (1)
     {
-
         if (tim1_update_flag)
         {
             tim1_update_flag = 0;

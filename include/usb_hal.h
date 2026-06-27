@@ -11,6 +11,14 @@
 #include <string.h>
 #include <usb_descriptors.h>
 
+#define IRQ_return(IRQn)          \
+    do                            \
+    {                             \
+                                  \
+        USBFSD->INT_FG = intflag; \
+        return;                   \
+    } while (0)
+
 uint8_t *usb_get_rx_buf(uint8_t ep);
 
 uint8_t *usb_get_tx_buf(uint8_t ep);

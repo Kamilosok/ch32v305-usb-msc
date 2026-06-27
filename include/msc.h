@@ -12,19 +12,6 @@
 #define CBWSignature (0x43425355)
 #define CSWSignature (0x53425355)
 
-#define FLASH_PAGE_SIZE (256ul)
-#define STORAGE_PAGE_FIRST (256ul)
-#define STORAGE_PAGE_LAST (496ul)
-
-#define NUM_LBA (0x0080ul)
-
-#define LBA_LENGTH (0x0200ul)
-
-#define STORAGE_BASE (0x08000000ul + STORAGE_PAGE_FIRST * FLASH_PAGE_SIZE)
-#define STORAGE_SIZE (NUM_LBA * FLASH_PAGE_SIZE)
-
-#define ERASED_WORD (0xe339e339)
-
 typedef struct __attribute__((packed))
 {
     uint32_t dCBWSignature;
@@ -54,8 +41,6 @@ typedef enum
 // TODO: Full bot logic here
 
 void msc_init();
-
-uint8_t *get_page_cache(void);
 
 void set_csw(uint32_t residue, uint8_t status);
 

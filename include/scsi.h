@@ -6,7 +6,7 @@
 #pragma once
 
 #include <inttypes.h>
-#include <msc.h>
+#include <flash_storage.h>
 
 #define INQUIRY_OP (0x12)
 #define TEST_UNIT_READY_OP (0x00)

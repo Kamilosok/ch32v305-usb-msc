@@ -13,19 +13,9 @@ static uint32_t cbw_tag = 0;
 
 static const uint8_t max_lun = 0;
 
-// TODO: Move disk operations elsewhere
-static __attribute__((aligned(4))) uint8_t page_cache[FLASH_PAGE_SIZE];
-
 void msc_init(void)
 {
     current_csw.dCSWSignature = CSWSignature;
-
-    memset(page_cache, 0, FLASH_PAGE_SIZE);
-}
-
-uint8_t *get_page_cache(void)
-{
-    return page_cache;
 }
 
 void set_csw(uint32_t residue, uint8_t status)
@@ -67,7 +57,6 @@ uint8_t get_before_csw(void)
 // out_field specifies which byte was erroneous
 uint8_t validCBW(cbw *CBW)
 {
-    // NO USBFSD->
     if (CBW->dCBWSignature != CBWSignature || USBFSD->RX_LEN != sizeof(cbw) || before_csw)
         return 0;
     return 1;
