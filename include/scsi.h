@@ -17,6 +17,7 @@
 #define PREVENT_ALLOW_MEDIUM_REMOVAL_OP (0x1E)
 #define WRITE_10_OP (0x2A)
 #define START_STOP_UNIT_OP (0x1B)
+#define READ_FORMAT_CAPACITIES (0x23)
 
 typedef struct
 {
@@ -72,6 +73,21 @@ typedef struct __attribute__((packed))
     uint8_t block_descriptor_length;
 } mode_parameter_header_6;
 
+typedef struct __attribute__((packed))
+{
+    uint8_t reserved[3];
+    uint8_t capacity_list_length;
+} capacity_list_header;
+
+// For READ_FORMAT_CAPACITIES
+typedef struct __attribute__((packed))
+{
+    uint32_t num_of_blocks;
+    uint8_t desc_code;
+    // In little-endian
+    uint8_t block_len[3];
+} maximum_capacity_header;
+
 uint8_t command_supported(uint8_t command_op);
 
 void set_sense(uint8_t key, uint8_t asc, uint8_t ascq, uint8_t deferred);
@@ -87,5 +103,9 @@ const inquiry_data *get_inquiry_data(void);
 const read_capacity_data *get_read_capacity_data(void);
 
 const mode_parameter_header_6 *get_mode_parameter_header_6(void);
+
+const capacity_list_header *get_capacity_list_header(void);
+
+const maximum_capacity_header *get_maximum_capacity_header(void);
 
 // TODO: Add more of the SCSI logic here

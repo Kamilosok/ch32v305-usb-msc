@@ -14,8 +14,8 @@ static const device_descriptor dd = {
     .bDeviceSubClass = 0,
     .bDeviceProtocol = 0,
     .bMaxPacketSize = 64,
-    .idVendor = 0,
-    .idProduct = 0,
+    .idVendor = 0x1234,  // Cokolwiek byle nie zero
+    .idProduct = 0x5678, // Cokolwiek byle nie zero
     .bcdDevice = 0x0100,
 
     // Change iSerial when adding win

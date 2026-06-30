@@ -16,6 +16,7 @@ The device appears to the host system as a small flash drive.
 - SCSI command handling
 - No RTOS or external USB stack
 - Bare-metal implementation
+- Linux & Windows compatibility
 
 ## Memory backend
 

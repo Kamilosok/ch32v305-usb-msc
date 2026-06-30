@@ -48,6 +48,9 @@ uint8_t bot_stage = 0;
 uint8_t write_stage = 0;
 uint8_t prevent_medium_removal;
 
+// Temporary, change enumeration to a state machine
+uint8_t change_back = 0;
+
 uint32_t first_invalid_lba = 0;
 
 static volatile uint8_t usb_update_flag = 0;
@@ -65,6 +68,13 @@ void USBFS_IRQHandler(void)
     stflag = USBFSD->INT_ST;
 
     uint8_t endp = stflag & USBFS_UIS_ENDP_MASK;
+
+    if (change_back)
+    {
+        USBFSD->UEP0_TX_CTRL = USBFS_UEP_T_RES_NAK;
+        USBFSD->UEP0_RX_CTRL = USBFS_UEP_R_RES_ACK;
+        change_back = 0;
+    }
 
     if (intflag & USBFS_UIF_TRANSFER)
     {
@@ -112,6 +122,7 @@ void USBFS_IRQHandler(void)
                     // Full-Speed device must respond with a request error
                     USBFSD->UEP0_TX_CTRL = USBFS_UEP_T_RES_STALL;
                     USBFSD->UEP0_RX_CTRL = USBFS_UEP_R_RES_STALL;
+                    change_back = 1;
                     printf("Qualifier\r\n");
                 }
                 else if (bmRequestType == 0x80 && bRequest == USB_GET_DESCRIPTOR && (wValue >> 8) == USB_DESCR_TYP_CONFIG)
@@ -147,6 +158,7 @@ void USBFS_IRQHandler(void)
                 }
                 else if (bmRequestType == 0xa1 && bRequest == USB_GET_MAX_LUN)
                 {
+                    printf("GET MAX LUN\r\n");
                     USBFSD->UEP0_TX_LEN = 1;
                     memcpy(ep0_buf, get_max_LUN(), 1);
                     USBFSD->UEP0_TX_CTRL = USBFS_UEP_T_TOG | USBFS_UEP_T_RES_ACK;
@@ -184,6 +196,7 @@ void USBFS_IRQHandler(void)
             // printf("EP1\r\n");
             if ((stflag & USBFS_UIS_TOKEN_MASK) == USBFS_UIS_TOKEN_OUT)
             {
+                // printf("OUT\r\n");
                 if (write_stage)
                 {
                     uint16_t chunk = (total_bytes - received_bytes > EP1_IN_BUF_SIZE) ? EP1_IN_BUF_SIZE : (total_bytes - received_bytes);
@@ -241,6 +254,8 @@ void USBFS_IRQHandler(void)
 
                     if (!command_supported(CBW.CBWCB[0]))
                     {
+                        printf("Unsupported command: %02x\r\n", CBW.CBWCB[0]);
+
                         set_sense(0x05, 0x20, 0x00, 0);
                         set_field_pointer(0);
 
@@ -268,7 +283,8 @@ void USBFS_IRQHandler(void)
                         // No support for Vital Product Data
                         if (evpd != 0)
                         {
-                            set_sense(0x05, 0x20, 0x00, 0);
+                            printf("EVPD\r\n");
+                            set_sense(0x05, 0x24, 0x00, 0);
                             set_error_pointers(0, 1);
 
                             set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
@@ -280,6 +296,7 @@ void USBFS_IRQHandler(void)
 
                         if (page_code != 0)
                         {
+                            printf("PC\r\n");
                             set_sense(0x05, 0x24, 0x00, 0);
                             set_field_pointer(2);
 
@@ -596,10 +613,42 @@ void USBFS_IRQHandler(void)
 
                         IRQ_return(USBFS_IRQn);
 
+                    case READ_FORMAT_CAPACITIES:
+                        printf("Read format capacities\r\n");
+                        uint8_t lun = CBW.CBWCB[1] >> 4;
+
+                        uint16_t alloc_len_r = (CBW.CBWCB[7] << 8) + CBW.CBWCB[8];
+
+                        if (lun > 0)
+                        {
+                            set_sense(0x05, 0x24, 0x00, 0);
+
+                            set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
+
+                            usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
+
+                            IRQ_return(USBFS_IRQn);
+                        }
+
+                        set_sense(0, 0, 0, 0);
+
+                        set_csw(0, CSW_STATUS_OK);
+
+                        memcpy(usb_get_tx_buf(1), get_capacity_list_header(), sizeof(capacity_list_header));
+
+                        memcpy(usb_get_tx_buf(1) + sizeof(capacity_list_header), get_maximum_capacity_header(), sizeof(maximum_capacity_header));
+
+                        // Data manipulation done earlier, maybe this should be done some other way...
+                        usb_tx_data_ep_res(NULL, MIN(CBW.dCBWDataTransferLength, MIN(alloc_len_r, sizeof(capacity_list_header) + sizeof(maximum_capacity_header))),
+                                           1, USBFS_UEP_T_RES_ACK);
+
+                        IRQ_return(USBFS_IRQn);
+
                     case REQUEST_SENSE_OP:
                         printf("Request Sense\r\n");
 
                         uint8_t desc = CBW.CBWCB[1] & 0b1;
+                        alloc_len = CBW.CBWCB[4];
                         // We don't support descriptor format sense data, so just send fixed sense data
                         if (desc)
                             printf("Unsupported descriptor format sense data!\r\n");
@@ -645,7 +694,7 @@ void USBFS_IRQHandler(void)
 
                         switch (sense->sense_key)
                         {
-                        // ILLEGAL REQUEST (maybe define them laetr)
+                        // ILLEGAL REQUEST (maybe define them later)
                         case 0x05:
                             // SKSV 1 - valid, C/D 1 - no payload error handling for now
                             fsd.sense_key_spec[0] = 0b11000000;
@@ -676,10 +725,15 @@ void USBFS_IRQHandler(void)
                             fsd.sense_key_spec[2] = 0;
                         }
 
-                        // current_csw.dCSWDataResidue = 0;
-                        // current_csw.bCSWStatus = 0x00;
+                        // Change all transfers to this
+                        uint32_t data_to_transfer = MIN(sizeof(fixed_sense_data), MIN(alloc_len, CBW.dCBWDataTransferLength));
 
-                        usb_tx_data_ep_res(&fsd, sizeof(fixed_sense_data), 1, USBFS_UEP_T_RES_ACK);
+                        set_csw(CBW.dCBWDataTransferLength - data_to_transfer, CSW_STATUS_OK);
+
+                        // Change all to this?
+                        usb_tx_data_ep_res(&fsd, MIN(MIN(alloc_len, CBW.dCBWDataTransferLength), sizeof(fixed_sense_data)), 1, USBFS_UEP_T_RES_ACK);
+
+                        set_sense(0, 0, 0, 0);
 
                         IRQ_return(USBFS_IRQn);
 
@@ -708,7 +762,6 @@ void USBFS_IRQHandler(void)
                     }
                     else
                     {
-
                         uint16_t chunk = (total_bytes - sent_bytes > EP1_OUT_BUF_SIZE) ? EP1_OUT_BUF_SIZE : (total_bytes - sent_bytes);
 
                         uint32_t retrieve_addr = start_LBA * LBA_LENGTH + sent_bytes;

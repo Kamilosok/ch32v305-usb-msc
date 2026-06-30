@@ -9,7 +9,7 @@ static const inquiry_data iq = {
     .peripheral = 0x00,
     .rmb = 0x80,
 
-    .version = (1 << 7), // Compliant with SPC-3, but we don't support a lot of it
+    .version = 0x05, // Compliant with SPC-3, but we don't support a lot of it
 
     .resp_data_format = 0x02,
     .additional_length = 31,
@@ -39,6 +39,19 @@ static const mode_parameter_header_6 mph6 = {
     .block_descriptor_length = 0,
 };
 
+static const capacity_list_header clh =
+    {
+        .capacity_list_length = 8, // equal to eight times the number of descriptors, so 1*8
+};
+
+static const maximum_capacity_header mch =
+    {
+        .num_of_blocks = __builtin_bswap32(NUM_LBA),
+        .desc_code = 0b10, // Formatted Media
+        .block_len = {(LBA_LENGTH >> 16) & 0xFF,
+                      (LBA_LENGTH >> 8) & 0xFF, (LBA_LENGTH) & 0xFF},
+};
+
 static sense current_sense;
 
 uint8_t command_supported(uint8_t command_op)
@@ -54,6 +67,7 @@ uint8_t command_supported(uint8_t command_op)
     case PREVENT_ALLOW_MEDIUM_REMOVAL_OP:
     case WRITE_10_OP:
     case START_STOP_UNIT_OP:
+    case READ_FORMAT_CAPACITIES:
         return 1;
 
     default:
@@ -100,4 +114,14 @@ const read_capacity_data *get_read_capacity_data(void)
 const mode_parameter_header_6 *get_mode_parameter_header_6(void)
 {
     return &mph6;
+}
+
+const capacity_list_header *get_capacity_list_header(void)
+{
+    return &clh;
+}
+
+const maximum_capacity_header *get_maximum_capacity_header(void)
+{
+    return &mch;
 }
