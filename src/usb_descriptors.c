@@ -24,54 +24,50 @@ static const device_descriptor dd = {
     .bNumConfigurations = 1,
 };
 
-static const config_descriptor cd = {
-    .bLength = 9,
-    .bDescriptorType = 0x02,
-    .wTotalLength = sizeof(config_descriptor) + sizeof(interface_descriptor) + 2 * sizeof(endpoint_descriptor), // + (endpoint, and class or vendor specific descriptors
-    .bNumInterfaces = 1,
-    .bConfigurationValue = 1,
-    .iConfiguration = 0, // No string
-    .bmAttributes = 0x80,
-    .bMaxPower = 50, // 100 mA
-};
-
-static const interface_descriptor id = {
-    .bLength = 9,
-    .bDescriptorType = 0x04,
-    .bInterfaceNumber = 0,
-    .bAlternateSetting = 0,
-    .bNumEndpoints = 2, // EP1 IN and OUT
-    .bInterfaceClass = 0x08,
-    .bInterfaceSubClass = 0x06,
-    .bInterfaceProtocol = 0x50,
-    .iInterface = 0,
-};
-
-static const endpoint_descriptor ed1_in = {
-    .bLength = 7,
-    .bDescriptorType = 0x05,
-    // In EP1
-    .bEndpointAddress = ((1 & 0x01) << 7) | (1 & 0b1111),
-    .bmAttributes = 0x02, // Bulk
-    .wMaxPacketSize = 64,
-    // Ignored for Bulk & Control Endpoints
-    .bInterval = 0,
-};
-
-static const endpoint_descriptor ed1_out = {
-    .bLength = 7,
-    .bDescriptorType = 0x05,
-    // Out EP1
-    .bEndpointAddress = ((0 & 0x01) << 7) | (1 & 0b1111),
-    .bmAttributes = 0x02, // Bulk
-    .wMaxPacketSize = 64,
-    // Ignored for Bulk & Control Endpoints
-    .bInterval = 0,
+// The specific descriptor tree for my MSC device, though open for expansion in the future
+static const msc_descriptor_tree msc_dt = {
+    .config = {
+        .bLength = 9,
+        .bDescriptorType = 0x02,
+        .wTotalLength = sizeof(msc_descriptor_tree),
+        .bNumInterfaces = 1,
+        .bConfigurationValue = 1,
+        .iConfiguration = 0,
+        .bmAttributes = 0x80,
+        .bMaxPower = 50,
+    },
+    .interface = {
+        .bLength = 9,
+        .bDescriptorType = 0x04,
+        .bInterfaceNumber = 0,
+        .bAlternateSetting = 0,
+        .bNumEndpoints = 2,
+        .bInterfaceClass = 0x08,
+        .bInterfaceSubClass = 0x06,
+        .bInterfaceProtocol = 0x50,
+        .iInterface = 0,
+    },
+    .ep1_out = {
+        .bLength = 7,
+        .bDescriptorType = 0x05,
+        .bEndpointAddress = 0x01,
+        .bmAttributes = 0x02,
+        .wMaxPacketSize = 64,
+        .bInterval = 0,
+    },
+    .ep1_in = {
+        .bLength = 7,
+        .bDescriptorType = 0x05,
+        .bEndpointAddress = 0x81,
+        .bmAttributes = 0x02,
+        .wMaxPacketSize = 64,
+        .bInterval = 0,
+    },
 };
 
 static const endpoint_descriptor *const ep_descriptors[] = {
-    &ed1_in,
-    &ed1_out,
+    &msc_dt.ep1_in,
+    &msc_dt.ep1_out,
 };
 
 const device_descriptor *get_device_descriptor(void)
@@ -81,12 +77,12 @@ const device_descriptor *get_device_descriptor(void)
 
 const config_descriptor *get_configuration_descriptor(void)
 {
-    return &cd;
+    return &msc_dt.config;
 }
 
 const interface_descriptor *get_interface_descriptor(void)
 {
-    return &id;
+    return &msc_dt.interface;
 }
 
 const endpoint_descriptor *get_endpoint_descriptor(uint8_t ep, uint8_t in)
@@ -97,4 +93,9 @@ const endpoint_descriptor *get_endpoint_descriptor(uint8_t ep, uint8_t in)
     }
     else
         return NULL;
+}
+
+const msc_descriptor_tree *get_msc_descriptor_tree()
+{
+    return &msc_dt;
 }

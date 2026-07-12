@@ -49,6 +49,11 @@ void usb_set_tx_ep_res(uint8_t ep, uint8_t res)
         {
             *ctrl_reg = (*ctrl_reg & ~USBFS_UEP_T_RES_MASK) | res;
         }
+
+        if (ep == 0)
+        {
+            *ctrl_reg |= USBFS_UEP_T_TOG;
+        }
     }
 }
 
@@ -62,6 +67,11 @@ void usb_set_rx_ep_res(uint8_t ep, uint8_t res)
         if (res <= USBFS_UEP_R_RES_STALL)
         {
             *ctrl_reg = (*ctrl_reg & ~USBFS_UEP_R_RES_MASK) | res;
+        }
+
+        if (ep == 0)
+        {
+            *ctrl_reg |= USBFS_UEP_R_TOG;
         }
     }
 }

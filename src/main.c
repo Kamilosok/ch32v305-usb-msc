@@ -60,8 +60,6 @@ void USBFS_IRQHandler(void)
 {
     usb_update_flag = 1;
 
-    uint16_t __attribute__((unused)) len, wValue, __attribute__((unused)) wIndex, wLength;
-    uint8_t bmRequestType, bRequest;
     uint8_t intflag, stflag;
 
     intflag = USBFSD->INT_FG;
@@ -71,8 +69,8 @@ void USBFS_IRQHandler(void)
 
     if (change_back)
     {
-        USBFSD->UEP0_TX_CTRL = USBFS_UEP_T_RES_NAK;
-        USBFSD->UEP0_RX_CTRL = USBFS_UEP_R_RES_ACK;
+        usb_set_tx_ep_res(0, USBFS_UEP_T_RES_NAK);
+        usb_set_rx_ep_res(0, USBFS_UEP_R_RES_ACK);
         change_back = 0;
     }
 
@@ -81,43 +79,27 @@ void USBFS_IRQHandler(void)
         if (endp == 0 || !configured)
         {
             // printf("EP0\r\n");
-            // TODO: Change EP0 handling for more abstraction
-            uint8_t *ep0_buf = usb_get_rx_buf(0);
-
-            bmRequestType = ep0_buf[0];
-            bRequest = ep0_buf[1];
-            wValue = (ep0_buf[3] << 8) + ep0_buf[2];
-            wIndex = (ep0_buf[5] << 8) + ep0_buf[4];
-            wLength = (ep0_buf[7] << 8) + ep0_buf[6];
+            setup_packet setup_p;
+            // Data in this packet is little-endian, so we can simply copy
+            memcpy(&setup_p, usb_get_rx_buf(0), sizeof(setup_packet));
 
             if ((stflag & USBFS_UIS_TOKEN_MASK) == USBFS_UIS_TOKEN_SETUP)
             {
-                len = USBFSD->RX_LEN;
-
-                if (bmRequestType == 0x80 && bRequest == USB_GET_DESCRIPTOR && (wValue >> 8) == USB_DESCR_TYP_DEVICE)
+                if (setup_p.bmRequestType == 0x80 && setup_p.bRequest == USB_GET_DESCRIPTOR && (setup_p.wValue >> 8) == USB_DESCR_TYP_DEVICE)
                 {
-                    send_len = sizeof(device_descriptor);
-
-                    if (wLength < send_len)
-                        send_len = wLength;
-
-                    memcpy(ep0_buf, get_device_descriptor(), send_len);
-
-                    USBFSD->UEP0_TX_LEN = send_len;
-                    USBFSD->UEP0_TX_CTRL = USBFS_UEP_T_TOG | USBFS_UEP_T_RES_ACK;
+                    usb_tx_data_ep_res(get_device_descriptor(), MIN(sizeof(device_descriptor), setup_p.wLength), 0, USBFS_UEP_T_RES_ACK);
 
                     printf("Device descriptor\r\n");
                 }
-                else if (bmRequestType == 0x00 && bRequest == USB_SET_ADDRESS)
+                else if (setup_p.bmRequestType == 0x00 && setup_p.bRequest == USB_SET_ADDRESS)
                 {
                     // Set AFTER setup stage
-                    dev_addr = wValue;
-                    USBFSD->UEP0_TX_LEN = 0;
-                    USBFSD->UEP0_TX_CTRL = USBFS_UEP_T_TOG | USBFS_UEP_T_RES_ACK;
+                    dev_addr = setup_p.wValue;
+                    usb_tx_data_ep_res(NULL, 0, 0, USBFS_UEP_T_RES_ACK);
                     addr_stage = 1;
                     printf("Address setting\r\n");
                 }
-                else if (bmRequestType == 0x80 && bRequest == USB_GET_DESCRIPTOR && (wValue >> 8) == USB_DESCR_TYP_QUALIF)
+                else if (setup_p.bmRequestType == 0x80 && setup_p.bRequest == USB_GET_DESCRIPTOR && (setup_p.wValue >> 8) == USB_DESCR_TYP_QUALIF)
                 {
                     // Full-Speed device must respond with a request error
                     USBFSD->UEP0_TX_CTRL = USBFS_UEP_T_RES_STALL;
@@ -125,48 +107,33 @@ void USBFS_IRQHandler(void)
                     change_back = 1;
                     printf("Qualifier\r\n");
                 }
-                else if (bmRequestType == 0x80 && bRequest == USB_GET_DESCRIPTOR && (wValue >> 8) == USB_DESCR_TYP_CONFIG)
+                else if (setup_p.bmRequestType == 0x80 && setup_p.bRequest == USB_GET_DESCRIPTOR && (setup_p.wValue >> 8) == USB_DESCR_TYP_CONFIG)
                 {
-                    send_len = sizeof(config_descriptor) + sizeof(interface_descriptor) + 2 * sizeof(endpoint_descriptor);
+                    usb_tx_data_ep_res(get_msc_descriptor_tree(), MIN(sizeof(msc_descriptor_tree), setup_p.wLength), 0, USBFS_UEP_T_RES_ACK);
 
-                    if (wLength < send_len)
-                        send_len = wLength;
-
-                    memcpy(ep0_buf, get_configuration_descriptor(), sizeof(config_descriptor));
-                    // We need to send the config descriptor by itself first, then everything
-                    if (send_len > sizeof(config_descriptor))
-                    {
-                        memcpy(ep0_buf + sizeof(config_descriptor), get_interface_descriptor(), sizeof(interface_descriptor));
-                        memcpy(ep0_buf + sizeof(config_descriptor) + sizeof(interface_descriptor), get_endpoint_descriptor(1, 0), sizeof(endpoint_descriptor));
-                        memcpy(ep0_buf + sizeof(config_descriptor) + sizeof(interface_descriptor) + sizeof(endpoint_descriptor), get_endpoint_descriptor(1, 1), sizeof(endpoint_descriptor));
-                    }
-
-                    USBFSD->UEP0_TX_LEN = send_len;
-                    USBFSD->UEP0_TX_CTRL = USBFS_UEP_T_TOG | USBFS_UEP_T_RES_ACK;
                     config_stage = 1;
-                    printf("%u CONFIG\r\n", send_len);
+                    printf("%u CONFIG/TREE\r\n", send_len);
                 }
-                else if (bmRequestType == 0x00 && bRequest == USB_SET_CONFIGURATION)
+                else if (setup_p.bmRequestType == 0x00 && setup_p.bRequest == USB_SET_CONFIGURATION)
                 {
                     // We only have 1 configuration, so we ignore wValue
-                    uint8_t config_value = wValue;
+                    uint8_t config_value = setup_p.wValue;
                     configured = 1;
 
-                    USBFSD->UEP0_TX_LEN = 0;
-                    USBFSD->UEP0_TX_CTRL = USBFS_UEP_T_TOG | USBFS_UEP_T_RES_ACK;
+                    usb_tx_data_ep_res(NULL, 0, 0, USBFS_UEP_T_RES_ACK);
+
                     printf("%u SET CONFIG\r\n", config_value);
                 }
-                else if (bmRequestType == 0xa1 && bRequest == USB_GET_MAX_LUN)
+                else if (setup_p.bmRequestType == 0xa1 && setup_p.bRequest == USB_GET_MAX_LUN)
                 {
+                    usb_tx_data_ep_res(get_max_LUN(), 1, 0, USBFS_UEP_T_RES_ACK);
+
                     printf("GET MAX LUN\r\n");
-                    USBFSD->UEP0_TX_LEN = 1;
-                    memcpy(ep0_buf, get_max_LUN(), 1);
-                    USBFSD->UEP0_TX_CTRL = USBFS_UEP_T_TOG | USBFS_UEP_T_RES_ACK;
                 }
                 else
                 {
                     printf("BAD\r\n");
-                    printf("bmRequest %x bRequest %x wValue %x\r\n", bmRequestType, bRequest, wValue);
+                    printf("bmRequest %x bRequest %x wValue %x\r\n", setup_p.bmRequestType, setup_p.bRequest, setup_p.wValue);
                 }
             }
             else if ((stflag & USBFS_UIS_TOKEN_MASK) == USBFS_UIS_TOKEN_IN)
@@ -175,19 +142,19 @@ void USBFS_IRQHandler(void)
                 {
                     addr_stage = 0;
                     USBFSD->DEV_ADDR = dev_addr;
-                    USBFSD->UEP0_TX_CTRL = USBFS_UEP_T_TOG | USBFS_UEP_T_RES_ACK;
+                    usb_set_tx_ep_res(0, USBFS_UEP_T_RES_ACK);
                 }
                 else if (config_stage)
                 {
                     config_stage = 0;
-                    USBFSD->UEP0_TX_CTRL = USBFS_UEP_T_TOG | USBFS_UEP_T_RES_ACK;
-                    USBFSD->UEP0_RX_CTRL = USBFS_UEP_R_TOG | USBFS_UEP_R_RES_ACK;
+                    usb_set_tx_ep_res(0, USBFS_UEP_T_RES_ACK);
+                    usb_set_rx_ep_res(0, USBFS_UEP_R_RES_ACK);
                 }
                 // printf("IN\r\n");
             }
             else if ((stflag & USBFS_UIS_TOKEN_MASK) == USBFS_UIS_TOKEN_OUT)
             {
-                USBFSD->UEP0_RX_CTRL = USBFS_UEP_R_RES_ACK;
+                usb_set_rx_ep_res(0, USBFS_UEP_R_RES_ACK);
                 // printf("OUT\r\n");
             }
         }
@@ -228,7 +195,6 @@ void USBFS_IRQHandler(void)
                 {
                     cbw CBW;
                     memcpy(&CBW, usb_get_rx_buf(1), sizeof(cbw));
-                    len = USBFSD->RX_LEN;
 
                     if (!validCBW(&CBW))
                     {
