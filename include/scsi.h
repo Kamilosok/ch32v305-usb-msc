@@ -28,6 +28,7 @@ typedef struct
     uint8_t bpv;
     uint8_t bit_pointer;
     uint16_t field_pointer;
+    uint32_t first_invalid_lba;
 } sense;
 
 typedef struct __attribute__((packed))
@@ -96,6 +97,10 @@ void set_error_pointers(uint8_t bit_pointer, uint16_t byte_pointer);
 
 void set_field_pointer(uint16_t byte_pointer);
 
+void set_first_invalid_lba(uint32_t last_invalid_lba);
+
+uint32_t get_first_invalid_lba(void);
+
 const sense *get_sense(void);
 
 const inquiry_data *get_inquiry_data(void);
@@ -107,5 +112,3 @@ const mode_parameter_header_6 *get_mode_parameter_header_6(void);
 const capacity_list_header *get_capacity_list_header(void);
 
 const maximum_capacity_header *get_maximum_capacity_header(void);
-
-// TODO: Add more of the SCSI logic here

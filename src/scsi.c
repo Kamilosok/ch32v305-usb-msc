@@ -96,6 +96,16 @@ void set_field_pointer(uint16_t byte_pointer)
     current_sense.field_pointer = __builtin_bswap16(byte_pointer);
 }
 
+void set_first_invalid_lba(uint32_t first_invalid_lba)
+{
+    current_sense.first_invalid_lba = first_invalid_lba;
+}
+
+uint32_t get_first_invalid_lba(void)
+{
+    return current_sense.first_invalid_lba;
+}
+
 const sense *get_sense(void)
 {
     return &current_sense;

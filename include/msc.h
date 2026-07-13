@@ -36,9 +36,18 @@ typedef enum
     CSW_STATUS_OK = 0x00,
     CSW_STATUS_FAILED = 0x01,
     CSW_STATUS_PHASE_ERROR = 0x02,
+    CSW_STATUS_LAST,
 } csw_status_t;
 
-// TODO: Full bot logic here
+typedef enum
+{
+    BOT_STATE_IDLE = 0,
+    BOT_STATE_DATA_OUT,
+    BOT_STATE_DATA_IN,
+    BOT_STATE_SEND_CSW,
+    BOT_STATE_RECOVERY,
+    BOT_STATE_LAST,
+} msc_bot_state_t;
 
 void msc_init();
 
@@ -50,12 +59,12 @@ const csw *get_csw(void);
 
 uint8_t get_cbw_tag(void);
 
-void set_before_csw(uint8_t val);
-
-uint8_t get_before_csw(void);
-
 uint8_t validCBW(cbw *CBW);
 
 uint8_t meaningfulCBW(cbw *CBW);
 
 const uint8_t *get_max_LUN();
+
+uint8_t get_msc_state(void);
+
+void set_msc_state(uint8_t state);

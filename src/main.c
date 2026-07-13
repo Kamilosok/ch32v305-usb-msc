@@ -40,18 +40,19 @@ uint64_t start_LBA = 0;
 
 uint8_t dev_addr = 0;
 uint8_t send_len = sizeof(device_descriptor);
-// Maybe change this to an enum later
-uint8_t addr_stage = 0;
-uint8_t config_stage = 0;
-uint8_t configured = 0;
-uint8_t bot_stage = 0;
-uint8_t write_stage = 0;
 uint8_t prevent_medium_removal;
+static uint8_t stall_restore = 0;
 
-// Temporary, change enumeration to a state machine
-uint8_t change_back = 0;
+// TODO: Switch logic to more switch-case
+typedef enum
+{
+    USB_STATE_DEFAULT = 0,
+    USB_STATE_ADDRESS,
+    USB_STATE_CONFIGURED,
+    USB_STATE_SUSPENDED,
+} usb_device_state_t;
 
-uint32_t first_invalid_lba = 0;
+static usb_device_state_t dev_state = USB_STATE_DEFAULT;
 
 static volatile uint8_t usb_update_flag = 0;
 
@@ -67,16 +68,17 @@ void USBFS_IRQHandler(void)
 
     uint8_t endp = stflag & USBFS_UIS_ENDP_MASK;
 
-    if (change_back)
+    // Recover from stall on EP0
+    if (stall_restore)
     {
         usb_set_tx_ep_res(0, USBFS_UEP_T_RES_NAK);
         usb_set_rx_ep_res(0, USBFS_UEP_R_RES_ACK);
-        change_back = 0;
     }
 
     if (intflag & USBFS_UIF_TRANSFER)
     {
-        if (endp == 0 || !configured)
+        // USB controller sets the proper EP late
+        if (endp == 0 || dev_state == USB_STATE_DEFAULT)
         {
             // printf("EP0\r\n");
             setup_packet setup_p;
@@ -96,7 +98,7 @@ void USBFS_IRQHandler(void)
                     // Set AFTER setup stage
                     dev_addr = setup_p.wValue;
                     usb_tx_data_ep_res(NULL, 0, 0, USBFS_UEP_T_RES_ACK);
-                    addr_stage = 1;
+                    dev_state = USB_STATE_ADDRESS;
                     printf("Address setting\r\n");
                 }
                 else if (setup_p.bmRequestType == 0x80 && setup_p.bRequest == USB_GET_DESCRIPTOR && (setup_p.wValue >> 8) == USB_DESCR_TYP_QUALIF)
@@ -104,21 +106,19 @@ void USBFS_IRQHandler(void)
                     // Full-Speed device must respond with a request error
                     USBFSD->UEP0_TX_CTRL = USBFS_UEP_T_RES_STALL;
                     USBFSD->UEP0_RX_CTRL = USBFS_UEP_R_RES_STALL;
-                    change_back = 1;
+                    stall_restore = 1;
                     printf("Qualifier\r\n");
                 }
                 else if (setup_p.bmRequestType == 0x80 && setup_p.bRequest == USB_GET_DESCRIPTOR && (setup_p.wValue >> 8) == USB_DESCR_TYP_CONFIG)
                 {
                     usb_tx_data_ep_res(get_msc_descriptor_tree(), MIN(sizeof(msc_descriptor_tree), setup_p.wLength), 0, USBFS_UEP_T_RES_ACK);
-
-                    config_stage = 1;
                     printf("%u CONFIG/TREE\r\n", send_len);
                 }
                 else if (setup_p.bmRequestType == 0x00 && setup_p.bRequest == USB_SET_CONFIGURATION)
                 {
                     // We only have 1 configuration, so we ignore wValue
                     uint8_t config_value = setup_p.wValue;
-                    configured = 1;
+                    dev_state = USB_STATE_CONFIGURED;
 
                     usb_tx_data_ep_res(NULL, 0, 0, USBFS_UEP_T_RES_ACK);
 
@@ -138,15 +138,13 @@ void USBFS_IRQHandler(void)
             }
             else if ((stflag & USBFS_UIS_TOKEN_MASK) == USBFS_UIS_TOKEN_IN)
             {
-                if (addr_stage)
+                if (dev_state == USB_STATE_ADDRESS)
                 {
-                    addr_stage = 0;
                     USBFSD->DEV_ADDR = dev_addr;
                     usb_set_tx_ep_res(0, USBFS_UEP_T_RES_ACK);
                 }
-                else if (config_stage)
+                else if (dev_state == USB_STATE_CONFIGURED)
                 {
-                    config_stage = 0;
                     usb_set_tx_ep_res(0, USBFS_UEP_T_RES_ACK);
                     usb_set_rx_ep_res(0, USBFS_UEP_R_RES_ACK);
                 }
@@ -164,7 +162,7 @@ void USBFS_IRQHandler(void)
             if ((stflag & USBFS_UIS_TOKEN_MASK) == USBFS_UIS_TOKEN_OUT)
             {
                 // printf("OUT\r\n");
-                if (write_stage)
+                if (get_msc_state() == BOT_STATE_DATA_OUT)
                 {
                     uint16_t chunk = (total_bytes - received_bytes > EP1_IN_BUF_SIZE) ? EP1_IN_BUF_SIZE : (total_bytes - received_bytes);
                     uint32_t store_addr = start_LBA * LBA_LENGTH + received_bytes;
@@ -177,8 +175,7 @@ void USBFS_IRQHandler(void)
 
                     if (total_bytes == received_bytes)
                     {
-                        write_stage = 0;
-                        set_before_csw(0);
+                        set_msc_state(BOT_STATE_IDLE);
                         total_bytes = 0;
                         received_bytes = 0;
 
@@ -227,12 +224,14 @@ void USBFS_IRQHandler(void)
 
                         set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
 
-                        usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
+                        stall_restore = 1;
+
+                        usb_set_tx_ep_res(1, USBFS_UEP_T_RES_STALL);
 
                         IRQ_return(USBFS_IRQn);
                     }
 
-                    set_before_csw(1);
+                    // If command resolves in one function pass we don't change msc states
 
                     // Used in multiple commands, declared before the switch
                     uint64_t LBA;
@@ -263,8 +262,9 @@ void USBFS_IRQHandler(void)
                         set_sense(0x05, 0x24, 0x00, 0);
 
                         set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
+                        set_msc_state(BOT_STATE_SEND_CSW);
 
-                        usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
+                        usb_set_tx_ep_res(1, USBFS_UEP_T_RES_STALL);
 
                         IRQ_return(USBFS_IRQn);
                     }
@@ -287,8 +287,9 @@ void USBFS_IRQHandler(void)
                             set_error_pointers(0, 1);
 
                             set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
+                            set_msc_state(BOT_STATE_SEND_CSW);
 
-                            usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
+                            usb_set_tx_ep_res(1, USBFS_UEP_T_RES_STALL);
 
                             IRQ_return(USBFS_IRQn);
                         }
@@ -300,8 +301,9 @@ void USBFS_IRQHandler(void)
                             set_field_pointer(2);
 
                             set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
+                            set_msc_state(BOT_STATE_SEND_CSW);
 
-                            usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
+                            usb_set_tx_ep_res(1, USBFS_UEP_T_RES_STALL);
 
                             IRQ_return(USBFS_IRQn);
                         }
@@ -317,6 +319,7 @@ void USBFS_IRQHandler(void)
                         usb_tx_data_ep_res(get_inquiry_data(), data_to_transfer, 1, USBFS_UEP_T_RES_ACK);
 
                         // Send CSW ok in next IN
+                        set_msc_state(BOT_STATE_SEND_CSW);
                         IRQ_return(USBFS_IRQn);
 
                     case TEST_UNIT_READY_OP:
@@ -342,8 +345,9 @@ void USBFS_IRQHandler(void)
                             set_field_pointer(2);
 
                             set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
+                            set_msc_state(BOT_STATE_SEND_CSW);
 
-                            usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
+                            usb_set_tx_ep_res(1, USBFS_UEP_T_RES_STALL);
 
                             IRQ_return(USBFS_IRQn);
                         }
@@ -356,6 +360,7 @@ void USBFS_IRQHandler(void)
                         usb_tx_data_ep_res(get_read_capacity_data(), data_to_transfer, 1, USBFS_UEP_T_RES_ACK);
 
                         // Send CSW ok in next IN
+                        set_msc_state(BOT_STATE_SEND_CSW);
                         IRQ_return(USBFS_IRQn);
 
                     case READ_10_OP:
@@ -372,8 +377,9 @@ void USBFS_IRQHandler(void)
                             set_error_pointers(7, 1);
 
                             set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
+                            set_msc_state(BOT_STATE_SEND_CSW);
 
-                            usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
+                            usb_set_tx_ep_res(1, USBFS_UEP_T_RES_STALL);
 
                             IRQ_return(USBFS_IRQn);
                         }
@@ -387,13 +393,18 @@ void USBFS_IRQHandler(void)
                             set_field_pointer(2);
 
                             if (LBA >= NUM_LBA)
-                                first_invalid_lba = LBA;
+                            {
+                                set_first_invalid_lba(LBA);
+                            }
                             else
-                                first_invalid_lba = NUM_LBA;
+                            {
+                                set_first_invalid_lba(NUM_LBA);
+                            }
 
                             set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
+                            set_msc_state(BOT_STATE_SEND_CSW);
 
-                            usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
+                            usb_set_tx_ep_res(1, USBFS_UEP_T_RES_STALL);
 
                             IRQ_return(USBFS_IRQn);
                         }
@@ -410,6 +421,8 @@ void USBFS_IRQHandler(void)
                         }
                         else
                         {
+                            set_msc_state(BOT_STATE_DATA_IN);
+
                             start_LBA = LBA;
                             total_bytes = transfer_len * LBA_LENGTH;
                             sent_bytes = 0;
@@ -465,8 +478,9 @@ void USBFS_IRQHandler(void)
                             set_sense(0x05, 0x24, 0x00, 0);
 
                             set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
+                            set_msc_state(BOT_STATE_SEND_CSW);
 
-                            usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
+                            usb_set_tx_ep_res(1, USBFS_UEP_T_RES_STALL);
 
                             IRQ_return(USBFS_IRQn);
                         }
@@ -480,6 +494,7 @@ void USBFS_IRQHandler(void)
                         usb_tx_data_ep_res(get_mode_parameter_header_6(), data_to_transfer, 1, USBFS_UEP_T_RES_ACK);
 
                         // Send CSW ok in next IN
+                        set_msc_state(BOT_STATE_SEND_CSW);
                         IRQ_return(USBFS_IRQn);
 
                     case PREVENT_ALLOW_MEDIUM_REMOVAL_OP:
@@ -509,8 +524,9 @@ void USBFS_IRQHandler(void)
                             set_error_pointers(7, 1);
 
                             set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
+                            set_msc_state(BOT_STATE_SEND_CSW);
 
-                            usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
+                            usb_set_tx_ep_res(1, USBFS_UEP_T_RES_STALL);
 
                             IRQ_return(USBFS_IRQn);
                         }
@@ -524,13 +540,18 @@ void USBFS_IRQHandler(void)
                             set_field_pointer(2);
 
                             if (LBA >= NUM_LBA)
-                                first_invalid_lba = LBA;
+                            {
+                                set_first_invalid_lba(LBA);
+                            }
                             else
-                                first_invalid_lba = NUM_LBA;
+                            {
+                                set_first_invalid_lba(NUM_LBA);
+                            }
 
                             set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
+                            set_msc_state(BOT_STATE_SEND_CSW);
 
-                            usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
+                            usb_set_tx_ep_res(1, USBFS_UEP_T_RES_STALL);
 
                             IRQ_return(USBFS_IRQn);
                         }
@@ -547,7 +568,7 @@ void USBFS_IRQHandler(void)
                         }
                         else
                         {
-                            write_stage = 1;
+                            set_msc_state(BOT_STATE_DATA_OUT);
                             start_LBA = LBA;
                             total_bytes = transfer_len * LBA_LENGTH;
                             received_bytes = 0;
@@ -590,8 +611,9 @@ void USBFS_IRQHandler(void)
                             set_sense(0x05, 0x24, 0x00, 0);
                             set_error_pointers(7, 4);
                             set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
+                            set_msc_state(BOT_STATE_SEND_CSW);
 
-                            usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
+                            usb_set_tx_ep_res(1, USBFS_UEP_T_RES_STALL);
 
                             IRQ_return(USBFS_IRQn);
                         }
@@ -623,8 +645,9 @@ void USBFS_IRQHandler(void)
                             set_sense(0x05, 0x24, 0x00, 0);
 
                             set_csw(CBW.dCBWDataTransferLength, CSW_STATUS_FAILED);
+                            set_msc_state(BOT_STATE_SEND_CSW);
 
-                            usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
+                            usb_set_tx_ep_res(1, USBFS_UEP_T_RES_STALL);
 
                             IRQ_return(USBFS_IRQn);
                         }
@@ -642,6 +665,8 @@ void USBFS_IRQHandler(void)
                         // Data manipulation done earlier, maybe this should be done some other way...
                         usb_tx_data_ep_res(NULL, data_to_transfer, 1, USBFS_UEP_T_RES_ACK);
 
+                        // Send CSW ok in next IN
+                        set_msc_state(BOT_STATE_SEND_CSW);
                         IRQ_return(USBFS_IRQn);
 
                     case REQUEST_SENSE_OP:
@@ -651,7 +676,9 @@ void USBFS_IRQHandler(void)
                         alloc_len = CBW.CBWCB[4];
                         // We don't support descriptor format sense data, so just send fixed sense data
                         if (desc)
+                        {
                             printf("Unsupported descriptor format sense data!\r\n");
+                        }
 
                         fixed_sense_data fsd;
 
@@ -670,14 +697,16 @@ void USBFS_IRQHandler(void)
                         fsd.asc = sense->asc;
                         fsd.ascq = sense->ascq;
 
+                        uint32_t f_lba = get_first_invalid_lba();
+
                         /* The only commands with any INFORMATION field interaction we support are
                          * READ(10) and WRITE(10), so this is the only situation for writing to this field
                          */
-                        if (first_invalid_lba)
+                        if (f_lba != 0)
                         {
-                            uint32_t v = __builtin_bswap32(first_invalid_lba);
+                            uint32_t v = __builtin_bswap32(f_lba);
                             memcpy(fsd.info, &v, 4);
-                            first_invalid_lba = 0;
+                            set_first_invalid_lba(0);
                         }
 
                         // No additional sense bytes
@@ -727,7 +756,8 @@ void USBFS_IRQHandler(void)
 
                         data_to_transfer = MIN(CBW.dCBWDataTransferLength, MIN(alloc_len, sizeof(fixed_sense_data)));
 
-                        set_csw(CBW.dCBWDataTransferLength - data_to_transfer, CSW_STATUS_OK);
+                        set_csw(0, CSW_STATUS_OK);
+                        set_msc_state(BOT_STATE_SEND_CSW);
 
                         usb_tx_data_ep_res(&fsd, data_to_transfer, 1, USBFS_UEP_T_RES_ACK);
 
@@ -746,11 +776,11 @@ void USBFS_IRQHandler(void)
             {
                 // printf("IN\r\n");
 
-                if (get_before_csw())
+                if (get_msc_state() == BOT_STATE_DATA_IN || get_msc_state() == BOT_STATE_SEND_CSW)
                 {
                     if (total_bytes == sent_bytes)
                     {
-                        set_before_csw(0);
+                        set_msc_state(BOT_STATE_IDLE);
                         total_bytes = 0;
                         sent_bytes = 0;
 
@@ -777,6 +807,43 @@ void USBFS_IRQHandler(void)
                 }
 
                 usb_set_tx_ep_res(1, USBFS_UEP_T_RES_NAK);
+            }
+            else if ((stflag & USBFS_UIS_TOKEN_MASK) == USBFS_UIS_TOKEN_SETUP)
+            {
+                // For some reason the usb controller lags a bit when detecting which endpoint the packet was sent to,
+                // so here we assume it was meant for EP0, as EP1s are Bulk-Only, so this is logic for EP0
+                setup_packet setup_p;
+                memcpy(&setup_p, usb_get_rx_buf(0), sizeof(setup_packet));
+
+                if (setup_p.bRequest == USB_CLEAR_FEATURE && setup_p.wValue == USB_REQ_FEAT_ENDP_HALT)
+                {
+                    printf("CLEARING 1\r\n");
+                    uint8_t ep_num = setup_p.wIndex & 0x7F; // Ep number
+                    uint8_t is_in = setup_p.wIndex & 0x80;  // Direction
+
+                    if (ep_num == 1)
+                    {
+                        if (is_in)
+                        {
+                            USBFSD->UEP1_TX_CTRL = USBFS_UEP_T_RES_NAK;
+                        }
+                        else
+                        {
+                            USBFSD->UEP1_RX_CTRL = USBFS_UEP_R_RES_ACK;
+                        }
+                    }
+
+                    usb_tx_data_ep_res(NULL, 0, 0, USBFS_UEP_T_RES_ACK);
+
+                    if (ep_num == 1 && is_in && get_msc_state() == BOT_STATE_SEND_CSW)
+                    {
+                        // Reset to Data 0 with AUTO_TOG consideration
+                        USBFSD->UEP1_TX_CTRL &= ~(USBFS_UEP_T_TOG | USBFS_UEP_T_AUTO_TOG);
+                        USBFSD->UEP1_TX_CTRL |= USBFS_UEP_T_AUTO_TOG;
+                        usb_tx_data_ep_res(get_csw(), sizeof(csw), 1, USBFS_UEP_T_RES_ACK);
+                        set_msc_state(BOT_STATE_IDLE);
+                    }
+                }
             }
         }
     }

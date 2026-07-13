@@ -8,7 +8,7 @@
 #include <scsi.h>
 static csw current_csw;
 
-static uint8_t before_csw = 0;
+static msc_bot_state_t msc_state = BOT_STATE_IDLE;
 static uint32_t cbw_tag = 0;
 
 static const uint8_t max_lun = 0;
@@ -21,7 +21,7 @@ void msc_init(void)
 void set_csw(uint32_t residue, uint8_t status)
 {
     current_csw.dCSWDataResidue = residue;
-    if (status <= CSW_STATUS_PHASE_ERROR)
+    if (status < CSW_STATUS_LAST)
         current_csw.bCSWStatus = status;
 
     // else some error
@@ -44,28 +44,22 @@ uint8_t get_cbw_tag(void)
     return cbw_tag;
 }
 
-void set_before_csw(uint8_t val)
-{
-    before_csw = val;
-}
-
-uint8_t get_before_csw(void)
-{
-    return before_csw;
-}
-
 // out_field specifies which byte was erroneous
 uint8_t validCBW(cbw *CBW)
 {
-    if (CBW->dCBWSignature != CBWSignature || USBFSD->RX_LEN != sizeof(cbw) || before_csw)
+    if (CBW->dCBWSignature != CBWSignature || USBFSD->RX_LEN != sizeof(cbw) || msc_state != BOT_STATE_IDLE)
+    {
         return 0;
+    }
     return 1;
 }
 
 uint8_t meaningfulCBW(cbw *CBW)
 {
     if (((CBW->bCBWLUN & 0xF0) != 0) || ((CBW->bCBWCBLength & 0xE0) != 0) || CBW->bCBWLUN != 0)
+    {
         return 0;
+    }
 
     return 1;
 }
@@ -73,4 +67,17 @@ uint8_t meaningfulCBW(cbw *CBW)
 const uint8_t *get_max_LUN(void)
 {
     return (const uint8_t *)&max_lun;
+}
+
+uint8_t get_msc_state(void)
+{
+    return msc_state;
+}
+
+void set_msc_state(uint8_t state)
+{
+    if (state < BOT_STATE_LAST)
+    {
+        msc_state = state;
+    }
 }
