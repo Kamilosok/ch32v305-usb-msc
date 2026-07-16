@@ -56,6 +56,7 @@ static usb_device_state_t dev_state = USB_STATE_DEFAULT;
 
 static volatile uint8_t usb_update_flag = 0;
 
+// __attribute__((used)) is not needed here
 [[gnu::interrupt]]
 void USBFS_IRQHandler(void)
 {

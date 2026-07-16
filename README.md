@@ -32,15 +32,13 @@ Due to FLASH erase granularity limitations:
 ## Project structure
 
 ```bash
+├── ch32v30x-bsp    # Board Support Package submodule
 ├── include         # USB MSC, SCSI, and USB headers
-├── platform        # Platform-specific startup, linker, and system initialization code
 ├── scripts         # Scripts for testing
 ├── src             # Main program and protocol and implementation source
-├── vendor          # Vendor-provided WCH core and peripheral libraries
 ├── LICENSE         # Project license
 ├── Makefile        # Build system
 ├── README.md       # This file
-├── THIRD_PARTY.md  # Third-party disclaimer and licensing notes
 └── Thesis.pdf      # The thesis this project supports
 ```
 
@@ -74,7 +72,7 @@ make clean
 
 ## Third Party Code
 
-The code in the `/platform` and `/vendor` directories is licensed separately, for additional information see [THIRD_PARTY.md](THIRD_PARTY.md).
+The code in the `/ch32v30x-bsp` submodule is licensed separately, see the submodule's **`README.md`**.
 
 ---
 

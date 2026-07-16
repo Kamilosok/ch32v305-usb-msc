@@ -1,3 +1,5 @@
+include ch32v30x-bsp/bsp.mk
+
 TARGET     = main
 MCU        = ch32v305
 ARCH       = rv32imacf_zicsr_zifencei
@@ -17,28 +19,13 @@ OBJCOPY  = $(TOOLCHAIN_PREFIX)objcopy
 OBJDUMP  = $(TOOLCHAIN_PREFIX)objdump
 SIZE     = $(TOOLCHAIN_PREFIX)size
 
-VENDOR = vendor
-PLATFORM = platform
-
-LDSCRIPT   = $(PLATFORM)/linker/Link.ld
-
 # Source
-SRCS = \
-$(PLATFORM)/system/system_ch32v30x.c \
-$(PLATFORM)/startup/startup_ch32v30x_D8C.S \
-$(VENDOR)/core/core_riscv.c \
-$(VENDOR)/debug/debug.c
+SRCS = $(wildcard src/*.c)
+SRCS += $(BSP_SRCS)
 
-SRCS += $(wildcard src/*.c)
-
-SRCS += $(wildcard $(VENDOR)/peripheral/src/*.c)
-
-INCLUDES = \
--I./include \
--I./$(VENDOR)/core \
--I./$(VENDOR)/debug \
--I./$(VENDOR)/peripheral/inc \
--I./$(PLATFORM)/system
+# Include
+INCLUDES = -I./include
+INCLUDES += $(BSP_INCLUDES)
 
 # Build
 BUILD_DIR  = build
@@ -50,13 +37,15 @@ OBJS       := $(OBJS:%.S=$(BUILD_DIR)/%.o)
 CFLAGS  = -g -std=gnu11 $(OPTS)
 CFLAGS += -march=$(ARCH) -mabi=$(ABI)
 CFLAGS += -Wall #-ffreestanding -nostdlib
+CFLAGS += -ffunction-sections -fdata-sections
 CFLAGS += $(INCLUDES)
 CFLAGS += $(DEFS)
 
 # Linker flags
 LDFLAGS = -T $(LDSCRIPT)
-LDFLAGS += -Wl,-Map=$(BUILD_DIR)/$(TARGET).map
-LDFLAGS += -march=$(ARCH) -mabi=$(ABI)
+LDFLAGS += -Wl,--gc-sections
+LDFLAGS += -Wl,--defsym=FLASH_SIZE=64K
+LDFLAGS += -Wl,-Map=$(BUILD_DIR)/$(TARGET).map -march=$(ARCH) -mabi=$(ABI)
 LDFLAGS += -nostartfiles
 LDFLAGS += #-nostdlib
 

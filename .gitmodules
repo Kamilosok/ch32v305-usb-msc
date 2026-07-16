@@ -1,0 +1,3 @@
+[submodule "ch32v30x-bsp"]
+	path = ch32v30x-bsp
+	url = git@github.com:Kamilosok/ch32v30x-bsp.git
